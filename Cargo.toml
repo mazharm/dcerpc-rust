@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dcerpc",
+    "examples/dcerpc-echo-service",
+    "examples/print-service",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["DCE RPC Rust Implementation"]
+
+[workspace.dependencies]
+tokio = { version = "1.35", features = ["full"] }
+thiserror = "1.0"
+bytes = "1.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }

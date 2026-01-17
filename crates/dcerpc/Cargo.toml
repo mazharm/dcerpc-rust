@@ -1,0 +1,20 @@
+[package]
+name = "dcerpc"
+description = "DCE RPC (MS-RPC) client and server implementation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+
+# Windows SSPI support
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Credentials",
+    "Win32_Foundation",
+]}

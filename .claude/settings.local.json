@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.rfc-editor.org)",
+      "Bash(cargo build:*)",
+      "Bash(where cargo:*)",
+      "Bash(echo:*)",
+      "Bash(powershell.exe -Command \"Get-Command cargo -ErrorAction SilentlyContinue | Select-Object Source\")",
+      "Bash(cargo run:*)",
+      "Bash(taskkill:*)",
+      "Bash(cargo test:*)",
+      "Bash(del:*)",
+      "Bash(rustup show:*)",
+      "Bash(rustup default:*)",
+      "Bash(where:*)",
+      "Bash(cmd.exe //c \"cargo build --package print-service 2>&1\")",
+      "Bash(cmd.exe //c \"\"\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\Common7\\\\Tools\\\\VsDevCmd.bat\"\" -no_logo && cargo build --package print-service\")",
+      "Bash(dir \"C:\\\\Program Files\\\\Microsoft Visual Studio\")",
+      "Bash(dir \"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\")",
+      "Bash(rustup target add:*)",
+      "Bash(pacman -S:*)",
+      "Bash(ls:*)",
+      "Bash(rustup component list:*)",
+      "WebSearch",
+      "WebFetch(domain:pubs.opengroup.org)",
+      "Bash(cargo fix:*)",
+      "Bash(timeout:*)",
+      "Bash(ping:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+[package]
+name = "dcerpc-echo-service"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dcerpc-echo-service"
+path = "src/main.rs"
+
+[dependencies]
+dcerpc = { path = "../../crates/dcerpc" }
+bytes = "1.9"
+tokio = { version = "1.43", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"

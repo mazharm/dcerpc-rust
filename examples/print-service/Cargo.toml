@@ -1,0 +1,22 @@
+[package]
+name = "print-service"
+description = "DCE RPC print service - receives strings and prints them"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "print-server"
+path = "src/server.rs"
+
+[[bin]]
+name = "print-client"
+path = "src/client.rs"
+
+[dependencies]
+dcerpc = { path = "../../crates/dcerpc" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+bytes.workspace = true
+clap.workspace = true
