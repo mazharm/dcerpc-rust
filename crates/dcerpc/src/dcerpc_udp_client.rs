@@ -44,8 +44,12 @@ pub struct UdpDceRpcClient {
     /// Sequence number counter
     seqnum_counter: AtomicU32,
     /// Serial number counter (for retransmissions)
+    /// Reserved for future retransmission tracking
+    #[allow(dead_code)]
     serial_counter: AtomicU32,
     /// Server boot time (learned from responses)
+    /// Reserved for future server restart detection
+    #[allow(dead_code)]
     server_boot: u32,
     /// Call timeout
     timeout: Duration,

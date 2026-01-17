@@ -228,6 +228,10 @@ mod tests {
             .expect("Reverse call failed");
         assert_eq!(result.as_ref(), b"dcba");
 
+        // Drop client to close the connection before shutdown
+        // This allows the server's graceful shutdown to complete
+        drop(client);
+
         // Shutdown
         let _ = shutdown_tx.send(());
         let _ = server_handle.await;

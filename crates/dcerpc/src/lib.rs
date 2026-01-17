@@ -187,12 +187,15 @@ pub use dcerpc::{
 pub use dcerpc_client::{DceRpcClient, DceRpcClientBuilder};
 pub use dcerpc_server::{
     DceRpcServer, DceRpcServerConfig, Interface, InterfaceBuilder, OperationHandler,
+    ServerStats, ServerStatsSnapshot,
 };
 pub use dcerpc_transport::{DceRpcTransport, DEFAULT_MAX_PDU_SIZE};
 pub use dcerpc_udp_client::{
     UdpDceRpcClient, UdpDceRpcClientBuilder, DEFAULT_DCE_UDP_RETRIES, DEFAULT_DCE_UDP_TIMEOUT,
 };
-pub use dcerpc_udp_server::{UdpDceRpcServer, UdpDceRpcServerConfig};
+pub use dcerpc_udp_server::{
+    UdpDceRpcServer, UdpDceRpcServerConfig, UdpServerStats, UdpServerStatsSnapshot,
+};
 
 // DCE RPC Connectionless (Datagram) exports
 pub use dcerpc_cl::{
