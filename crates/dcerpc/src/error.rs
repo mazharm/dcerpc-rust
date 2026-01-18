@@ -64,6 +64,15 @@ pub enum RpcError {
 
     #[error("task join error: {0}")]
     JoinError(#[from] tokio::task::JoinError),
+
+    #[error("NDR encoding/decoding error: {0}")]
+    Ndr(String),
+}
+
+impl From<midl_ndr::NdrError> for RpcError {
+    fn from(err: midl_ndr::NdrError) -> Self {
+        RpcError::Ndr(err.to_string())
+    }
 }
 
 impl RpcError {

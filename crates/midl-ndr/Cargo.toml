@@ -1,0 +1,13 @@
+[package]
+name = "midl-ndr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "NDR (Network Data Representation) runtime library for MIDL-generated code"
+
+[dependencies]
+bytes = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]

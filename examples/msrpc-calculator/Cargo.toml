@@ -1,0 +1,25 @@
+[package]
+name = "msrpc-calculator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dcerpc = { path = "../../crates/dcerpc" }
+midl-ndr = { path = "../../crates/midl-ndr" }
+bytes = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+async-trait = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[[bin]]
+name = "calculator-server"
+path = "src/server.rs"
+
+[[bin]]
+name = "calculator-client"
+path = "src/client.rs"
+
+[lib]
+path = "src/lib.rs"

@@ -1,0 +1,15 @@
+// IHello DCOM interface
+// Note: [object] attribute indicates this is a DCOM/COM interface
+// which requires ORPC headers (OrpcThis/OrpcThat)
+[
+    uuid(87654321-4321-8765-4321-876543218765),
+    version(0.0)
+]
+interface IHello
+{
+    // Simple greeting method
+    long SayHello([in, string] char* name, [out, string] char** greeting);
+
+    // Echo back a message
+    long Echo([in, string] char* message, [out, string] char** response);
+}

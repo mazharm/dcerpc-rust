@@ -3,9 +3,14 @@ resolver = "2"
 members = [
     "crates/dcerpc",
     "crates/dcom",
+    "crates/midl-ndr",
+    "crates/midl",
+    "tools/midlc",
     "examples/dcerpc-echo-service",
     "examples/print-service",
     "examples/dcom-service",
+    "examples/msrpc-calculator",
+    "examples/dcom-hello",
 ]
 
 [workspace.package]
@@ -23,3 +28,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 uuid = { version = "1.0", features = ["v4"] }
 futures = "0.3"
+winnow = "0.6"
+quote = "1.0"
+proc-macro2 = "1.0"
+async-trait = "0.1"

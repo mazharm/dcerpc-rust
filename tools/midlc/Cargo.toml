@@ -1,0 +1,15 @@
+[package]
+name = "midlc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "MIDL (Microsoft Interface Definition Language) compiler CLI"
+
+[[bin]]
+name = "midlc"
+path = "src/main.rs"
+
+[dependencies]
+midl = { path = "../../crates/midl" }
+clap = { workspace = true }

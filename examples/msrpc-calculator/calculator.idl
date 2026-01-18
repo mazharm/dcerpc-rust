@@ -1,0 +1,19 @@
+// Calculator interface - simple MSRPC example
+[
+    uuid(12345678-1234-5678-1234-567812345678),
+    version(1.0)
+]
+interface ICalculator
+{
+    // Add two numbers
+    long Add([in] long a, [in] long b);
+
+    // Subtract b from a
+    long Subtract([in] long a, [in] long b);
+
+    // Multiply two numbers
+    long Multiply([in] long a, [in] long b);
+
+    // Divide a by b, return quotient and remainder
+    long Divide([in] long a, [in] long b, [out] long* remainder);
+}
