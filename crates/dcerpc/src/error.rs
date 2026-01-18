@@ -94,3 +94,34 @@ impl RpcError {
 }
 
 pub type Result<T> = std::result::Result<T, RpcError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn test_is_connection_closed() {
+        // Test ConnectionClosed variant
+        assert!(RpcError::ConnectionClosed.is_connection_closed());
+
+        // Test "early eof" message (Windows named pipe)
+        let err = RpcError::Io(Error::new(ErrorKind::Other, "early eof"));
+        assert!(err.is_connection_closed(), "Should detect 'early eof' as connection closed");
+
+        // Test UnexpectedEof kind
+        let err = RpcError::Io(Error::new(ErrorKind::UnexpectedEof, "unexpected eof"));
+        assert!(err.is_connection_closed(), "Should detect UnexpectedEof as connection closed");
+
+        // Test ConnectionReset kind
+        let err = RpcError::Io(Error::new(ErrorKind::ConnectionReset, "reset"));
+        assert!(err.is_connection_closed(), "Should detect ConnectionReset as connection closed");
+
+        // Test other errors are not connection closed
+        let err = RpcError::Io(Error::new(ErrorKind::PermissionDenied, "denied"));
+        assert!(!err.is_connection_closed(), "PermissionDenied should not be connection closed");
+
+        let err = RpcError::InvalidPdu;
+        assert!(!err.is_connection_closed(), "InvalidPdu should not be connection closed");
+    }
+}
