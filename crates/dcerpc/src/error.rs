@@ -26,6 +26,9 @@ pub enum RpcError {
     #[error("invalid PDU")]
     InvalidPdu,
 
+    #[error("invalid PDU: {0}")]
+    InvalidPduData(String),
+
     #[error("invalid message type: {0}")]
     InvalidMessageType(i32),
 

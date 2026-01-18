@@ -145,6 +145,9 @@ pub mod dcerpc_epm;
 pub mod dcerpc_epm_client;
 pub mod dcerpc_epm_server;
 
+// RPC Pipe support for streaming data
+pub mod dcerpc_pipe;
+
 // Re-export error types
 pub use error::{Result, RpcError};
 
@@ -238,3 +241,9 @@ pub use sspi::{SspiContext, SspiError, SspiResult};
 pub use dcerpc_auth_client::AuthenticatedDceRpcClient;
 #[cfg(windows)]
 pub use dcerpc_auth_server::{AuthServerConfig, AuthenticatedDceRpcServer};
+
+// RPC Pipe exports for streaming data within RPC calls
+pub use dcerpc_pipe::{
+    decode_pipe_data, encode_pipe_data, pipe_iter, AsyncPipeReader, AsyncPipeWriter, PipeChunk,
+    PipeChunkIterator, PipeElement, PipeFormat, PipeReader, PipeWriter, MAX_CHUNK_ELEMENTS,
+};
