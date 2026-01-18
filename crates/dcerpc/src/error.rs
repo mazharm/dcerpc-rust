@@ -66,4 +66,31 @@ pub enum RpcError {
     JoinError(#[from] tokio::task::JoinError),
 }
 
+impl RpcError {
+    /// Check if this error represents a normal connection close
+    /// (EOF, connection reset, etc.)
+    pub fn is_connection_closed(&self) -> bool {
+        match self {
+            RpcError::ConnectionClosed => true,
+            RpcError::Io(e) => {
+                // Check by error kind
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                ) {
+                    return true;
+                }
+                // Also check error message for EOF indicators
+                // (some platforms/libraries report EOF differently)
+                let msg = e.to_string().to_lowercase();
+                msg.contains("eof") || msg.contains("end of file")
+            }
+            _ => false,
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, RpcError>;

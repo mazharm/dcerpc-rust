@@ -234,7 +234,7 @@ async fn run_pipe_server(pipe_name: &str) -> Result<(), Box<dyn std::error::Erro
                 let pdu = match transport.read_pdu_decoded().await {
                     Ok(pdu) => pdu,
                     Err(e) => {
-                        if !matches!(e, RpcError::ConnectionClosed) {
+                        if !e.is_connection_closed() {
                             tracing::error!("Error reading PDU: {}", e);
                         }
                         break;
