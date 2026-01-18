@@ -10,7 +10,9 @@
 //!   print-client "Hello, World!"                # Send single message
 //!   print-client -m "msg1" -m "msg2"            # Send multiple messages
 //!   print-client --protocol udp "Hello"         # Send via UDP
+//!   print-client --protocol pipe "Hello"        # Send via named pipe (Windows)
 //!   print-client --host 192.168.1.1 --port 8000 # Connect to custom address
+//!   print-client --pipe mypipe "Hello"          # Custom pipe name (Windows)
 
 mod common;
 
@@ -24,6 +26,12 @@ use std::time::Duration;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
+#[cfg(windows)]
+use dcerpc::{
+    DceRpcNamedPipeClient, NamedPipeTransport, local_pipe_name,
+    dcerpc::{BindPdu, ContextResult, Pdu, RequestPdu, SyntaxId as DceSyntaxId, Uuid as DceUuid},
+};
+
 /// Transport protocol for RPC communication
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum Protocol {
@@ -31,6 +39,8 @@ enum Protocol {
     Tcp,
     /// UDP - Unreliable, connectionless
     Udp,
+    /// Pipe - Named pipes (Windows only)
+    Pipe,
 }
 
 #[derive(Parser, Debug)]
@@ -41,6 +51,10 @@ enum Protocol {
     long_about = "A demonstration DCE RPC client that sends string messages to the print server.\n\n\
 Uses DCE RPC (MS-RPCE) with UUID-based interface identification.\n\n\
 If no message is provided, enters interactive mode where you can type messages.\n\n\
+PROTOCOLS:\n\
+  tcp   Connection-oriented RPC over TCP/IP (default)\n\
+  udp   Connectionless RPC over UDP/IP\n\
+  pipe  Connection-oriented RPC over named pipes (Windows only)\n\n\
 INTERACTIVE COMMANDS:\n\
   <message>  Send the message to the server\n\
   ping       Send a null RPC call (health check)\n\
@@ -48,20 +62,29 @@ INTERACTIVE COMMANDS:\n\
   Ctrl+D     Disconnect and exit"
 )]
 struct Args {
-    /// Transport protocol (tcp or udp)
+    /// Transport protocol (tcp, udp, or pipe)
     ///
     /// TCP provides reliable delivery with connection tracking.
     /// UDP is connectionless with automatic retransmission support.
+    /// Pipe uses Windows named pipes for local/remote IPC.
     #[arg(short, long, value_enum, default_value = "tcp")]
     protocol: Protocol,
 
-    /// Host address to connect to
+    /// Host address to connect to (TCP/UDP only)
+    ///
+    /// Use 127.0.0.1 for localhost, or a remote IP address.
     #[arg(long, default_value = DEFAULT_HOST)]
     host: String,
 
-    /// Port number to connect to
+    /// Port number to connect to (TCP/UDP only)
     #[arg(long, default_value_t = DEFAULT_PORT)]
     port: u16,
+
+    /// Named pipe name (pipe protocol only)
+    ///
+    /// Connects to \\.\\pipe\\<name>
+    #[arg(long, default_value = DEFAULT_PIPE_NAME)]
+    pipe: String,
 
     /// Messages to send (repeatable)
     ///
@@ -142,10 +165,94 @@ impl UdpPrintClient {
     }
 }
 
+/// Named pipe client wrapper for DCE RPC (Windows only)
+#[cfg(windows)]
+struct PipePrintClient {
+    transport: NamedPipeTransport<tokio::net::windows::named_pipe::NamedPipeClient>,
+    context_id: u16,
+    call_id: u32,
+}
+
+#[cfg(windows)]
+impl PipePrintClient {
+    async fn connect(pipe_name: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let full_pipe_name = local_pipe_name(pipe_name);
+        let pipe = DceRpcNamedPipeClient::connect(&full_pipe_name).await?;
+        let mut transport = NamedPipeTransport::new(pipe);
+
+        // Perform bind
+        let interface_uuid = DceUuid::parse(PRINT_INTERFACE_UUID).expect("Invalid UUID");
+        let interface = DceSyntaxId::new(interface_uuid, PRINT_INTERFACE_VERSION, 0);
+
+        let bind = BindPdu::new(1, interface);
+        transport.write_pdu(&bind.encode()).await?;
+
+        // Read bind ack
+        let response = transport.read_pdu_decoded().await?;
+        match response {
+            Pdu::BindAck(ack) => {
+                if ack.results.is_empty() {
+                    return Err("Bind rejected: no results".into());
+                }
+                // Check that the context was accepted
+                let (result, _) = &ack.results[0];
+                if *result != ContextResult::Acceptance {
+                    return Err(format!("Bind rejected: {:?}", result).into());
+                }
+            }
+            _ => {
+                return Err("Bind rejected or unexpected response".into());
+            }
+        }
+
+        Ok(Self {
+            transport,
+            context_id: 0,
+            call_id: 2, // Start after bind
+        })
+    }
+
+    async fn send_message(&mut self, message: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let call_id = self.call_id;
+        self.call_id += 1;
+
+        let mut request = RequestPdu::new(call_id, OP_PRINT, Bytes::from(message.to_string()));
+        request.context_id = self.context_id;
+        self.transport.write_pdu(&Pdu::Request(request).encode()).await?;
+
+        // Read response
+        let response = self.transport.read_pdu_decoded().await?;
+        match response {
+            Pdu::Response(_) => Ok(()),
+            Pdu::Fault(fault) => Err(format!("RPC fault: {:?}", fault.status).into()),
+            _ => Err("Unexpected response".into()),
+        }
+    }
+
+    async fn null_call(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let call_id = self.call_id;
+        self.call_id += 1;
+
+        let mut request = RequestPdu::new(call_id, OP_NULL, Bytes::new());
+        request.context_id = self.context_id;
+        self.transport.write_pdu(&Pdu::Request(request).encode()).await?;
+
+        // Read response
+        let response = self.transport.read_pdu_decoded().await?;
+        match response {
+            Pdu::Response(_) => Ok(()),
+            Pdu::Fault(fault) => Err(format!("RPC fault: {:?}", fault.status).into()),
+            _ => Err("Unexpected response".into()),
+        }
+    }
+}
+
 /// Client abstraction to handle all transport combinations
 enum PrintClient {
     Tcp(TcpPrintClient),
     Udp(UdpPrintClient),
+    #[cfg(windows)]
+    Pipe(PipePrintClient),
 }
 
 impl PrintClient {
@@ -153,6 +260,8 @@ impl PrintClient {
         match self {
             PrintClient::Tcp(c) => c.send_message(message).await,
             PrintClient::Udp(c) => c.send_message(message).await,
+            #[cfg(windows)]
+            PrintClient::Pipe(c) => c.send_message(message).await,
         }
     }
 
@@ -160,6 +269,8 @@ impl PrintClient {
         match self {
             PrintClient::Tcp(c) => c.null_call().await,
             PrintClient::Udp(c) => c.null_call().await,
+            #[cfg(windows)]
+            PrintClient::Pipe(c) => c.null_call().await,
         }
     }
 }
@@ -168,6 +279,7 @@ fn get_protocol_display(protocol: Protocol) -> &'static str {
     match protocol {
         Protocol::Tcp => "DCE RPC / TCP",
         Protocol::Udp => "DCE RPC / UDP",
+        Protocol::Pipe => "DCE RPC / Named Pipe",
     }
 }
 
@@ -282,25 +394,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = tracing::subscriber::set_global_default(subscriber);
     }
 
-    let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
-
-    info!("Connecting to {} using {:?}", addr, args.protocol);
-
-    // Connect to server
-    let client = match args.protocol {
+    // Connect to server based on protocol
+    let (client, connection_info) = match args.protocol {
         Protocol::Tcp => {
+            let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
+            info!("Connecting to {} using TCP", addr);
             let c = TcpPrintClient::connect(addr).await?;
-            PrintClient::Tcp(c)
+            (PrintClient::Tcp(c), addr.to_string())
         }
         Protocol::Udp => {
+            let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
+            info!("Connecting to {} using UDP", addr);
             let c = UdpPrintClient::connect(addr).await?;
-            PrintClient::Udp(c)
+            (PrintClient::Udp(c), addr.to_string())
+        }
+        Protocol::Pipe => {
+            #[cfg(windows)]
+            {
+                let full_pipe_name = local_pipe_name(&args.pipe);
+                info!("Connecting to {} using Named Pipe", full_pipe_name);
+                let c = PipePrintClient::connect(&args.pipe).await?;
+                (PrintClient::Pipe(c), full_pipe_name)
+            }
+            #[cfg(not(windows))]
+            {
+                eprintln!("Error: Named pipe transport is only available on Windows.");
+                eprintln!("Please use --protocol tcp or --protocol udp on this platform.");
+                std::process::exit(1);
+            }
         }
     };
 
     if !args.quiet {
         let proto_name = get_protocol_display(args.protocol);
-        println!("Connected to {} via {}", addr, proto_name);
+        println!("Connected to {} via {}", connection_info, proto_name);
     }
 
     // Collect all messages

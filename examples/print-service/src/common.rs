@@ -21,3 +21,6 @@ pub const OP_PRINT: u16 = 1;
 /// Default server address
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 pub const DEFAULT_PORT: u16 = 12346;
+
+/// Default named pipe name (Windows)
+pub const DEFAULT_PIPE_NAME: &str = "printservice";
