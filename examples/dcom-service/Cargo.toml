@@ -1,0 +1,23 @@
+[package]
+name = "dcom-service"
+description = "DCOM example service - demonstrates COM object activation and method calls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dcom-server"
+path = "src/server.rs"
+
+[[bin]]
+name = "dcom-client"
+path = "src/client.rs"
+
+[dependencies]
+dcerpc = { path = "../../crates/dcerpc" }
+dcom = { path = "../../crates/dcom" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+bytes.workspace = true
+clap.workspace = true
