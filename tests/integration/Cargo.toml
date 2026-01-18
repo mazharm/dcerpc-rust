@@ -1,0 +1,46 @@
+[package]
+name = "integration-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+dcerpc = { path = "../../crates/dcerpc" }
+dcom = { path = "../../crates/dcom" }
+midl-ndr = { path = "../../crates/midl-ndr" }
+tokio = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+rand = "0.8"
+parking_lot = "0.12"
+
+[[bin]]
+name = "run-tests"
+path = "src/main.rs"
+
+[[test]]
+name = "stress_tests"
+path = "src/stress_tests.rs"
+
+[[test]]
+name = "apartment_tests"
+path = "src/apartment_tests.rs"
+
+[[test]]
+name = "complex_types_tests"
+path = "src/complex_types_tests.rs"
+
+[[test]]
+name = "multi_hop_tests"
+path = "src/multi_hop_tests.rs"
+
+[[test]]
+name = "circular_call_tests"
+path = "src/circular_call_tests.rs"
+
+[[test]]
+name = "pipe_tests"
+path = "src/pipe_tests.rs"
