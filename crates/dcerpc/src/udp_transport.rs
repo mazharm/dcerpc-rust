@@ -1,6 +1,6 @@
-//! UDP transport for ONC RPC
+//! UDP transport for DCE RPC connectionless protocol
 //!
-//! RFC 5531 Section 10: UDP transports do not use Record Marking.
+//! UDP transports do not use Record Marking.
 //! Each UDP datagram contains exactly one complete RPC message.
 //! The maximum message size is limited by UDP datagram size.
 
