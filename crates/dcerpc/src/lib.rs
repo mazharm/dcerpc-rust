@@ -148,6 +148,10 @@ pub mod dcerpc_epm_server;
 // RPC Pipe support for streaming data
 pub mod dcerpc_pipe;
 
+// Named pipe transport (Windows)
+#[cfg(windows)]
+pub mod named_pipe_transport;
+
 // Re-export error types
 pub use error::{Result, RpcError};
 
@@ -246,4 +250,12 @@ pub use dcerpc_auth_server::{AuthServerConfig, AuthenticatedDceRpcServer};
 pub use dcerpc_pipe::{
     decode_pipe_data, encode_pipe_data, pipe_iter, AsyncPipeReader, AsyncPipeWriter, PipeChunk,
     PipeChunkIterator, PipeElement, PipeFormat, PipeReader, PipeWriter, MAX_CHUNK_ELEMENTS,
+};
+
+// Named pipe transport exports (Windows only)
+#[cfg(windows)]
+pub use named_pipe_transport::{
+    local_pipe_name, parse_pipe_endpoint, remote_pipe_name, DceRpcNamedPipeClient,
+    DceRpcNamedPipeServer, NamedPipeServerConfig, NamedPipeTransport, DEFAULT_MAX_PIPE_PDU_SIZE,
+    DEFAULT_PIPE_BUFFER_SIZE, EPM_PIPE_NAME, NAMED_PIPE_PROTOCOL_ID,
 };

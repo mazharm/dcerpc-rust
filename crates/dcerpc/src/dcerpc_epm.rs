@@ -139,6 +139,44 @@ impl TowerFloor {
         }
     }
 
+    /// Create a named pipe floor with pipe name
+    ///
+    /// The pipe name should be in the format `\pipe\name` (without server prefix).
+    /// It will be encoded as a null-terminated ASCII string.
+    pub fn named_pipe(pipe_name: &str) -> Self {
+        // Normalize the pipe name - remove any leading backslashes or \pipe\ prefix
+        let name = pipe_name
+            .trim_start_matches('\\')
+            .trim_start_matches("pipe\\")
+            .trim_start_matches('\\');
+
+        // Create the endpoint string with \pipe\ prefix
+        let endpoint = format!("\\pipe\\{}", name);
+
+        // Encode as null-terminated ASCII
+        let mut rhs = endpoint.as_bytes().to_vec();
+        rhs.push(0); // Null terminator
+
+        Self {
+            protocol_id: protocol_id::NAMED_PIPE,
+            lhs_data: vec![protocol_id::NAMED_PIPE],
+            rhs_data: rhs,
+        }
+    }
+
+    /// Create a NetBIOS floor with server name
+    pub fn netbios(server_name: &str) -> Self {
+        // Encode as null-terminated ASCII
+        let mut rhs = server_name.as_bytes().to_vec();
+        rhs.push(0); // Null terminator
+
+        Self {
+            protocol_id: protocol_id::NETBIOS,
+            lhs_data: vec![protocol_id::NETBIOS],
+            rhs_data: rhs,
+        }
+    }
+
     /// Encode to bytes
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -253,6 +291,72 @@ impl ProtocolTower {
         tower
     }
 
+    /// Create a tower for named pipe endpoint (local)
+    ///
+    /// # Arguments
+    /// * `interface_uuid` - Interface UUID
+    /// * `interface_version` - Interface major version
+    /// * `transfer_syntax` - Transfer syntax (usually NDR)
+    /// * `pipe_name` - Pipe name (e.g., "mypipe" or r"\pipe\mypipe")
+    pub fn named_pipe_tower(
+        interface_uuid: &Uuid,
+        interface_version: u16,
+        transfer_syntax: &SyntaxId,
+        pipe_name: &str,
+    ) -> Self {
+        let mut tower = Self::new();
+        // Floor 1: Interface UUID
+        tower
+            .floors
+            .push(TowerFloor::uuid(interface_uuid, interface_version, 0));
+        // Floor 2: Transfer syntax (NDR)
+        tower.floors.push(TowerFloor::uuid(
+            &transfer_syntax.uuid,
+            transfer_syntax.major_version(),
+            transfer_syntax.minor_version(),
+        ));
+        // Floor 3: RPC connection-oriented (named pipes use CO)
+        tower.floors.push(TowerFloor::rpc_co());
+        // Floor 4: Named pipe endpoint
+        tower.floors.push(TowerFloor::named_pipe(pipe_name));
+        tower
+    }
+
+    /// Create a tower for named pipe endpoint with NetBIOS server name (remote)
+    ///
+    /// # Arguments
+    /// * `interface_uuid` - Interface UUID
+    /// * `interface_version` - Interface major version
+    /// * `transfer_syntax` - Transfer syntax (usually NDR)
+    /// * `pipe_name` - Pipe name (e.g., "mypipe" or r"\pipe\mypipe")
+    /// * `server_name` - NetBIOS or DNS server name
+    pub fn named_pipe_tower_remote(
+        interface_uuid: &Uuid,
+        interface_version: u16,
+        transfer_syntax: &SyntaxId,
+        pipe_name: &str,
+        server_name: &str,
+    ) -> Self {
+        let mut tower = Self::new();
+        // Floor 1: Interface UUID
+        tower
+            .floors
+            .push(TowerFloor::uuid(interface_uuid, interface_version, 0));
+        // Floor 2: Transfer syntax (NDR)
+        tower.floors.push(TowerFloor::uuid(
+            &transfer_syntax.uuid,
+            transfer_syntax.major_version(),
+            transfer_syntax.minor_version(),
+        ));
+        // Floor 3: RPC connection-oriented (named pipes use CO)
+        tower.floors.push(TowerFloor::rpc_co());
+        // Floor 4: Named pipe endpoint
+        tower.floors.push(TowerFloor::named_pipe(pipe_name));
+        // Floor 5: NetBIOS server name
+        tower.floors.push(TowerFloor::netbios(server_name));
+        tower
+    }
+
     /// Add a floor to the tower
     pub fn add_floor(&mut self, floor: TowerFloor) {
         self.floors.push(floor);
@@ -319,6 +423,41 @@ impl ProtocolTower {
         self.floors
             .iter()
             .any(|f| f.protocol_id == protocol_id::UDP)
+    }
+
+    /// Check if this is a named pipe tower
+    pub fn is_named_pipe(&self) -> bool {
+        self.floors
+            .iter()
+            .any(|f| f.protocol_id == protocol_id::NAMED_PIPE)
+    }
+
+    /// Get the named pipe name from the tower
+    pub fn named_pipe_name(&self) -> Option<String> {
+        self.floors.iter().find_map(|floor| {
+            if floor.protocol_id == protocol_id::NAMED_PIPE && !floor.rhs_data.is_empty() {
+                // Decode null-terminated ASCII string
+                let end = floor.rhs_data.iter().position(|&b| b == 0)
+                    .unwrap_or(floor.rhs_data.len());
+                String::from_utf8(floor.rhs_data[..end].to_vec()).ok()
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Get the NetBIOS server name from the tower
+    pub fn netbios_name(&self) -> Option<String> {
+        self.floors.iter().find_map(|floor| {
+            if floor.protocol_id == protocol_id::NETBIOS && !floor.rhs_data.is_empty() {
+                // Decode null-terminated ASCII string
+                let end = floor.rhs_data.iter().position(|&b| b == 0)
+                    .unwrap_or(floor.rhs_data.len());
+                String::from_utf8(floor.rhs_data[..end].to_vec()).ok()
+            } else {
+                None
+            }
+        })
     }
 
     /// Encode the tower to bytes
