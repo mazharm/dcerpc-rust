@@ -176,7 +176,7 @@ impl Default for NamedPipeServerConfig {
     fn default() -> Self {
         Self {
             pipe_name: String::new(),
-            max_instances: 255,
+            max_instances: 254, // Windows maximum is 254
             in_buffer_size: DEFAULT_PIPE_BUFFER_SIZE,
             out_buffer_size: DEFAULT_PIPE_BUFFER_SIZE,
             max_connections: 10000,
