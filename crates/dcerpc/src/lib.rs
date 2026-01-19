@@ -148,6 +148,9 @@ pub mod dcerpc_epm_server;
 // RPC Pipe support for streaming data
 pub mod dcerpc_pipe;
 
+// Fragmentation support for large PDUs
+pub mod fragmentation;
+
 // Named pipe transport (Windows)
 #[cfg(windows)]
 pub mod named_pipe_transport;
@@ -259,3 +262,6 @@ pub use named_pipe_transport::{
     DceRpcNamedPipeServer, NamedPipeServerConfig, NamedPipeTransport, DEFAULT_MAX_PIPE_PDU_SIZE,
     DEFAULT_PIPE_BUFFER_SIZE, EPM_PIPE_NAME, NAMED_PIPE_PROTOCOL_ID,
 };
+
+// Fragmentation support for large PDU transfers
+pub use fragmentation::{FragmentAssembler, FragmentGenerator};

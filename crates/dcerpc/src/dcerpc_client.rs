@@ -5,6 +5,7 @@
 use crate::dcerpc::{BindPdu, ContextResult, Pdu, RequestPdu, SyntaxId, Uuid};
 use crate::dcerpc_transport::DceRpcTransport;
 use crate::error::{Result, RpcError};
+use crate::fragmentation::{FragmentAssembler, FragmentGenerator};
 use bytes::Bytes;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -117,12 +118,43 @@ impl DceRpcClient {
     ///
     /// # Returns
     /// The stub data from the response (in NDR format)
+    ///
+    /// # Fragmentation
+    /// If the stub data exceeds the negotiated `max_xmit_frag` limit,
+    /// the request is automatically split into multiple fragments.
+    /// Similarly, fragmented responses are automatically reassembled.
     pub async fn call(&self, opnum: u16, stub_data: Bytes) -> Result<Bytes> {
         if !self.is_bound {
             return Err(RpcError::CallRejected("not bound".to_string()));
         }
 
         let call_id = self.call_id_counter.fetch_add(1, Ordering::SeqCst);
+
+        // Calculate max stub size for this connection
+        let max_stub = FragmentGenerator::max_stub_size(self.max_xmit_frag, 0, false);
+
+        // Check if we need to fragment
+        if stub_data.len() > max_stub {
+            debug!(
+                "Fragmenting request: call_id={}, opnum={}, stub_len={}, max_stub={}",
+                call_id,
+                opnum,
+                stub_data.len(),
+                max_stub
+            );
+            self.send_fragmented_request(call_id, opnum, stub_data).await
+        } else {
+            self.send_single_request(call_id, opnum, stub_data).await
+        }
+    }
+
+    /// Send a single (non-fragmented) request and receive response
+    async fn send_single_request(
+        &self,
+        call_id: u32,
+        opnum: u16,
+        stub_data: Bytes,
+    ) -> Result<Bytes> {
         let mut request = RequestPdu::new(call_id, opnum, stub_data);
         request.context_id = self.context_id;
 
@@ -139,39 +171,111 @@ impl DceRpcClient {
             write.write_pdu(&request.encode()).await?;
         }
 
-        // Read response
-        let pdu = {
-            let mut read = self.read_transport.lock().await;
-            read.read_pdu_decoded().await?
-        };
+        // Receive response (possibly fragmented)
+        self.receive_response(call_id).await
+    }
 
-        match pdu {
-            Pdu::Response(response) => {
-                if response.header.call_id != call_id {
-                    return Err(RpcError::XidMismatch {
-                        expected: call_id,
-                        got: response.header.call_id,
-                    });
-                }
+    /// Send a fragmented request and receive response
+    async fn send_fragmented_request(
+        &self,
+        call_id: u32,
+        opnum: u16,
+        stub_data: Bytes,
+    ) -> Result<Bytes> {
+        let mut request = RequestPdu::new(call_id, opnum, stub_data);
+        request.context_id = self.context_id;
 
-                trace!("Call succeeded: {} bytes result", response.stub_data.len());
+        // Generate fragments
+        let fragments = FragmentGenerator::fragment_request(&request, self.max_xmit_frag);
 
-                Ok(response.stub_data)
+        debug!(
+            "Sending {} fragments for call_id={}, opnum={}",
+            fragments.len(),
+            call_id,
+            opnum
+        );
+
+        // Send all fragments
+        {
+            let mut write = self.write_transport.lock().await;
+            for (i, frag) in fragments.iter().enumerate() {
+                trace!(
+                    "Sending fragment {}/{}: stub_len={}, first={}, last={}",
+                    i + 1,
+                    fragments.len(),
+                    frag.stub_data.len(),
+                    frag.header.packet_flags.is_first_frag(),
+                    frag.header.packet_flags.is_last_frag()
+                );
+                write.write_pdu(&frag.encode()).await?;
             }
-            Pdu::Fault(fault) => {
-                if fault.header.call_id != call_id {
-                    return Err(RpcError::XidMismatch {
-                        expected: call_id,
-                        got: fault.header.call_id,
-                    });
-                }
+        }
 
-                Err(RpcError::CallRejected(format!(
-                    "fault: status=0x{:08x}",
-                    fault.status
-                )))
+        // Receive response (possibly fragmented)
+        self.receive_response(call_id).await
+    }
+
+    /// Receive a response, handling fragmentation if needed
+    async fn receive_response(&self, call_id: u32) -> Result<Bytes> {
+        let mut read = self.read_transport.lock().await;
+        let mut assembler: Option<FragmentAssembler> = None;
+
+        loop {
+            let pdu = read.read_pdu_decoded().await?;
+
+            match pdu {
+                Pdu::Response(response) => {
+                    if response.header.call_id != call_id {
+                        return Err(RpcError::XidMismatch {
+                            expected: call_id,
+                            got: response.header.call_id,
+                        });
+                    }
+
+                    let is_first = response.header.packet_flags.is_first_frag();
+                    let is_last = response.header.packet_flags.is_last_frag();
+
+                    // Check if this is a complete (non-fragmented) response
+                    if is_first && is_last {
+                        trace!("Call succeeded: {} bytes result", response.stub_data.len());
+                        return Ok(response.stub_data);
+                    }
+
+                    // Handle fragmented response
+                    let asm = assembler.get_or_insert_with(|| FragmentAssembler::new(call_id));
+
+                    if let Some(complete) = asm.add_fragment(
+                        &response.header,
+                        &response.stub_data,
+                        response.context_id,
+                        None, // No opnum in response
+                        response.alloc_hint,
+                    )? {
+                        trace!("Reassembled response: {} bytes", complete.len());
+                        return Ok(complete);
+                    }
+
+                    trace!(
+                        "Received response fragment: first={}, last={}",
+                        is_first,
+                        is_last
+                    );
+                }
+                Pdu::Fault(fault) => {
+                    if fault.header.call_id != call_id {
+                        return Err(RpcError::XidMismatch {
+                            expected: call_id,
+                            got: fault.header.call_id,
+                        });
+                    }
+
+                    return Err(RpcError::CallRejected(format!(
+                        "fault: status=0x{:08x}",
+                        fault.status
+                    )));
+                }
+                _ => return Err(RpcError::InvalidMessageType(0)),
             }
-            _ => Err(RpcError::InvalidMessageType(0)),
         }
     }
 

@@ -18,10 +18,10 @@
 //! - Server boot time helps clients detect server restarts
 
 use crate::dcerpc::Uuid;
-use crate::dcerpc_cl::{ClFaultPdu, ClPdu, ClRejectPdu, ClRequestPdu, ClResponsePdu};
+use crate::dcerpc_cl::{ClFaultPdu, ClPdu, ClPduHeader, ClRejectPdu, ClRequestPdu, ClResponsePdu, CL_HEADER_SIZE};
 use crate::dcerpc_server::Interface;
 use crate::error::Result;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -95,6 +95,73 @@ pub struct UdpServerStatsSnapshot {
     pub bytes_sent: u64,
 }
 
+/// Key for identifying a fragmented request assembly
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct FragmentKey {
+    peer_addr: SocketAddr,
+    activity_id: Uuid,
+    seqnum: u32,
+}
+
+/// In-progress fragment assembly
+struct FragmentAssembly {
+    fragments: HashMap<u16, Bytes>,
+    #[allow(dead_code)]
+    opnum: u16,
+    #[allow(dead_code)]
+    if_id: Uuid,
+    #[allow(dead_code)]
+    if_vers: u32,
+    header_template: ClPduHeader,
+    received_last: bool,
+    last_fragnum: u16,
+}
+
+impl FragmentAssembly {
+    fn new(header: &ClPduHeader) -> Self {
+        Self {
+            fragments: HashMap::new(),
+            opnum: header.opnum,
+            if_id: header.if_id,
+            if_vers: header.if_vers,
+            header_template: header.clone(),
+            received_last: false,
+            last_fragnum: 0,
+        }
+    }
+
+    fn add_fragment(&mut self, fragnum: u16, body: Bytes, is_last: bool) {
+        self.fragments.insert(fragnum, body);
+        if is_last {
+            self.received_last = true;
+            self.last_fragnum = fragnum;
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        if !self.received_last {
+            return false;
+        }
+        // Check we have all fragments from 0 to last_fragnum
+        for i in 0..=self.last_fragnum {
+            if !self.fragments.contains_key(&i) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn reassemble(&mut self) -> Bytes {
+        let mut result = BytesMut::new();
+        for i in 0..=self.last_fragnum {
+            if let Some(body) = self.fragments.remove(&i) {
+                result.extend_from_slice(&body);
+            }
+        }
+        result.freeze()
+    }
+}
+
 /// UDP DCE RPC Server (Connectionless)
 ///
 /// This server uses the DCE RPC connectionless (datagram) protocol,
@@ -106,6 +173,11 @@ pub struct UdpServerStatsSnapshot {
 /// - Each incoming packet is dispatched to a worker task
 /// - A semaphore limits maximum concurrent requests
 /// - Multiple receiver tasks can run in parallel
+///
+/// # Fragmentation
+///
+/// Large requests and responses are automatically fragmented and
+/// reassembled using the CL fragmentation protocol.
 pub struct UdpDceRpcServer {
     interfaces: Arc<RwLock<HashMap<Uuid, Interface>>>,
     config: UdpDceRpcServerConfig,
@@ -113,6 +185,8 @@ pub struct UdpDceRpcServer {
     server_boot: u32,
     /// Server statistics
     stats: Arc<UdpServerStats>,
+    /// Fragment assembly cache for incoming fragmented requests
+    fragment_cache: Arc<RwLock<HashMap<FragmentKey, FragmentAssembly>>>,
 }
 
 impl UdpDceRpcServer {
@@ -128,6 +202,7 @@ impl UdpDceRpcServer {
             config: UdpDceRpcServerConfig::default(),
             server_boot,
             stats: Arc::new(UdpServerStats::default()),
+            fragment_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -143,6 +218,7 @@ impl UdpDceRpcServer {
             config,
             server_boot,
             stats: Arc::new(UdpServerStats::default()),
+            fragment_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -281,6 +357,8 @@ impl UdpDceRpcServer {
         let interfaces = Arc::clone(&self.interfaces);
         let server_boot = self.server_boot;
         let stats = Arc::clone(&self.stats);
+        let fragment_cache = Arc::clone(&self.fragment_cache);
+        let max_message_size = self.config.max_message_size;
 
         tokio::spawn(async move {
             // Acquire semaphore permit (limits concurrency)
@@ -293,7 +371,17 @@ impl UdpDceRpcServer {
             };
 
             // Process the packet
-            if let Some(response) = process_packet(&data, peer_addr, &interfaces, server_boot, &stats).await {
+            let responses = process_packet(
+                &data,
+                peer_addr,
+                &interfaces,
+                server_boot,
+                &stats,
+                &fragment_cache,
+                max_message_size,
+            ).await;
+
+            for response in responses {
                 let response_len = response.len();
                 if let Err(e) = socket.send_to(&response, peer_addr).await {
                     error!("Failed to send response to {}: {}", peer_addr, e);
@@ -311,54 +399,137 @@ impl Default for UdpDceRpcServer {
     }
 }
 
-/// Process a single packet and return the response (if any)
+/// Process a single packet and return the response(s)
+///
+/// Returns a Vec of response packets. For fragmented responses,
+/// multiple packets are returned.
 async fn process_packet(
     data: &[u8],
     peer_addr: SocketAddr,
     interfaces: &Arc<RwLock<HashMap<Uuid, Interface>>>,
     server_boot: u32,
     stats: &Arc<UdpServerStats>,
-) -> Option<Bytes> {
+    fragment_cache: &Arc<RwLock<HashMap<FragmentKey, FragmentAssembly>>>,
+    max_message_size: usize,
+) -> Vec<Bytes> {
     // Decode the PDU
     let pdu = match ClPdu::decode(data) {
         Ok(pdu) => pdu,
         Err(e) => {
             error!("Failed to decode CL PDU from {}: {}", peer_addr, e);
             stats.requests_failed.fetch_add(1, Ordering::Relaxed);
-            return None;
+            return vec![];
         }
     };
 
     match pdu {
         ClPdu::Request(request) => {
+            let is_frag = request.header.flags1.is_frag();
+            let is_lastfrag = request.header.flags1.is_lastfrag();
+            let fragnum = request.header.fragnum;
+
             trace!(
-                "Received CL request from {}: seqnum={}, opnum={}, if={}, body_len={}",
+                "Received CL request from {}: seqnum={}, opnum={}, if={}, body_len={}, fragnum={}, frag={}, lastfrag={}",
                 peer_addr,
                 request.header.seqnum,
                 request.header.opnum,
                 request.header.if_id,
-                request.body.len()
+                request.body.len(),
+                fragnum,
+                is_frag,
+                is_lastfrag
             );
 
-            let response = process_request(&request, peer_addr, interfaces, server_boot, stats).await;
-            Some(response.encode())
+            // Check if this is a non-fragmented request
+            if !is_frag && is_lastfrag && fragnum == 0 {
+                // Single request - process immediately
+                let response = process_request(&request, peer_addr, interfaces, server_boot, stats).await;
+                return fragment_response(response, max_message_size);
+            }
+
+            // Handle fragmented request
+            let key = FragmentKey {
+                peer_addr,
+                activity_id: request.header.act_id,
+                seqnum: request.header.seqnum,
+            };
+
+            let complete_body = {
+                let mut cache = fragment_cache.write().await;
+
+                // Get or create assembly
+                let assembly = cache.entry(key.clone()).or_insert_with(|| {
+                    FragmentAssembly::new(&request.header)
+                });
+
+                assembly.add_fragment(fragnum, request.body.clone(), is_lastfrag);
+
+                if assembly.is_complete() {
+                    let body = assembly.reassemble();
+                    let header = assembly.header_template.clone();
+                    cache.remove(&key);
+                    Some((body, header))
+                } else {
+                    None
+                }
+            };
+
+            if let Some((body, header)) = complete_body {
+                debug!(
+                    "Reassembled CL request from {}: seqnum={}, total_body_len={}",
+                    peer_addr, header.seqnum, body.len()
+                );
+
+                // Create a complete request from reassembled data
+                let complete_request = ClRequestPdu {
+                    header,
+                    body,
+                };
+
+                let response = process_request(&complete_request, peer_addr, interfaces, server_boot, stats).await;
+                return fragment_response(response, max_message_size);
+            }
+
+            // Still waiting for more fragments
+            vec![]
         }
 
         ClPdu::Ping(ping) => {
-            // Client is checking if call is still being processed
-            // For now, respond with nocall (we don't track pending calls)
-            debug!(
-                "Received CL ping from {}: seqnum={}",
-                peer_addr, ping.header.seqnum
-            );
-            let nocall = crate::dcerpc_cl::ClNocallPdu::new(&ping.header);
-            Some(nocall.encode())
+            // Check if we have a pending fragment assembly for this call
+            let key = FragmentKey {
+                peer_addr,
+                activity_id: ping.header.act_id,
+                seqnum: ping.header.seqnum,
+            };
+
+            let has_pending = {
+                let cache = fragment_cache.read().await;
+                cache.contains_key(&key)
+            };
+
+            if has_pending {
+                // We're still assembling fragments, send working
+                debug!(
+                    "Received CL ping from {} for pending assembly: seqnum={}",
+                    peer_addr, ping.header.seqnum
+                );
+                let working = crate::dcerpc_cl::ClWorkingPdu::new(&ping.header);
+                vec![working.encode()]
+            } else {
+                // No pending call
+                debug!(
+                    "Received CL ping from {}: seqnum={}",
+                    peer_addr, ping.header.seqnum
+                );
+                let nocall = crate::dcerpc_cl::ClNocallPdu::new(&ping.header);
+                vec![nocall.encode()]
+            }
         }
 
         ClPdu::Ack(_) => {
             // Client acknowledging our response, nothing to do
             trace!("Received CL ack from {}", peer_addr);
-            None
+            vec![]
         }
 
         _ => {
@@ -367,8 +538,62 @@ async fn process_packet(
                 peer_addr,
                 pdu.header().ptype
             );
-            None
+            vec![]
         }
+    }
+}
+
+/// Fragment a response PDU if it exceeds the max message size
+fn fragment_response(response: ClPdu, max_message_size: usize) -> Vec<Bytes> {
+    let max_body = max_message_size.saturating_sub(CL_HEADER_SIZE);
+
+    match response {
+        ClPdu::Response(resp) => {
+            if resp.body.len() <= max_body {
+                // Single response
+                vec![resp.encode()]
+            } else {
+                // Fragment the response
+                let total_len = resp.body.len();
+                let num_fragments = (total_len + max_body - 1) / max_body;
+
+                debug!(
+                    "Fragmenting CL response: seqnum={}, total_body_len={}, num_fragments={}",
+                    resp.header.seqnum, total_len, num_fragments
+                );
+
+                let mut responses = Vec::with_capacity(num_fragments);
+
+                for fragnum in 0..num_fragments {
+                    let offset = fragnum * max_body;
+                    let end = (offset + max_body).min(total_len);
+                    let chunk = resp.body.slice(offset..end);
+                    let is_last = fragnum == num_fragments - 1;
+
+                    let mut header = resp.header.clone();
+                    header.fragnum = fragnum as u16;
+                    header.len = chunk.len() as u16;
+
+                    // Set fragment flags
+                    if fragnum > 0 {
+                        header.flags1.set_frag();
+                    }
+                    if is_last {
+                        header.flags1.set_lastfrag();
+                    }
+
+                    let mut buf = BytesMut::with_capacity(CL_HEADER_SIZE + chunk.len());
+                    header.encode(&mut buf);
+                    buf.extend_from_slice(&chunk);
+
+                    responses.push(buf.freeze());
+                }
+
+                responses
+            }
+        }
+        // Faults and rejects are never fragmented
+        other => vec![other.encode()],
     }
 }
 

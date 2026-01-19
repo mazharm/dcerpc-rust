@@ -67,6 +67,15 @@ pub enum RpcError {
 
     #[error("NDR encoding/decoding error: {0}")]
     Ndr(String),
+
+    #[error("fragment assembly error: {0}")]
+    FragmentAssemblyError(String),
+
+    #[error("fragment out of order: received middle/last fragment before first")]
+    FragmentOutOfOrder,
+
+    #[error("fragment timeout: received {received} fragments, waiting for more")]
+    FragmentTimeout { received: usize },
 }
 
 impl From<midl_ndr::NdrError> for RpcError {

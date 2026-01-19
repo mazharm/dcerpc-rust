@@ -11,6 +11,7 @@ use crate::dcerpc::{
 use crate::dcerpc_server::Interface;
 use crate::dcerpc_transport::DceRpcTransport;
 use crate::error::{Result, RpcError};
+use crate::fragmentation::{FragmentAssembler, FragmentGenerator};
 use crate::security::{AuthLevel, AuthType, AuthVerifier};
 use std::collections::HashMap;
 use std::future::Future;
@@ -198,6 +199,11 @@ struct AuthConnectionContext {
     auth_type: Option<AuthType>,
     auth_level: Option<AuthLevel>,
     auth_context_id: u32,
+    /// Fragment assemblers for incoming fragmented requests (keyed by call_id)
+    request_assemblers: HashMap<u32, (FragmentAssembler, Vec<u8>)>,
+    /// Negotiated max fragment sizes
+    max_xmit_frag: u16,
+    max_recv_frag: u16,
 }
 
 #[cfg(windows)]
@@ -226,6 +232,9 @@ async fn handle_authenticated_connection(
         auth_type: None,
         auth_level: None,
         auth_context_id: 0,
+        request_assemblers: HashMap::new(),
+        max_xmit_frag: config.max_xmit_frag,
+        max_recv_frag: config.max_recv_frag,
     };
 
     let ndr_syntax = SyntaxId::new(
@@ -256,6 +265,10 @@ async fn handle_authenticated_connection(
                 )
                 .await?;
 
+                // Update negotiated fragment sizes
+                ctx.max_xmit_frag = response.max_xmit_frag;
+                ctx.max_recv_frag = response.max_recv_frag;
+
                 write_transport.write_pdu(&response.encode()).await?;
             }
 
@@ -280,24 +293,58 @@ async fn handle_authenticated_connection(
             }
 
             Pdu::Request(request) => {
+                let call_id = request.header.call_id;
+                let is_first = request.header.packet_flags.is_first_frag();
+                let is_last = request.header.packet_flags.is_last_frag();
+
                 debug!(
-                    "Received request: call_id={}, opnum={}, auth={}",
-                    request.header.call_id,
+                    "Received request: call_id={}, opnum={}, auth={}, first={}, last={}",
+                    call_id,
                     request.opnum,
-                    request.auth_verifier.is_some()
+                    request.auth_verifier.is_some(),
+                    is_first,
+                    is_last
                 );
 
                 // Check authentication requirements
                 if !config.allow_unauthenticated && ctx.security_context.is_none() {
-                    let fault = FaultPdu::new(request.header.call_id, FaultStatus::AccessDenied);
+                    let fault = FaultPdu::new(call_id, FaultStatus::AccessDenied);
                     write_transport.write_pdu(&fault.encode()).await?;
                     continue;
                 }
 
-                let response =
-                    process_authenticated_request(&request, &interfaces, &mut ctx).await;
+                // Check if this is a complete (non-fragmented) request
+                if is_first && is_last {
+                    // Complete request - process immediately
+                    let response =
+                        process_authenticated_request(&request, &interfaces, &mut ctx).await;
+                    send_authenticated_response_fragmented(
+                        response,
+                        &mut ctx,
+                        &mut write_transport,
+                    )
+                    .await?;
+                } else {
+                    // Fragmented request - accumulate
+                    let complete_request = handle_authenticated_request_fragment(
+                        &mut ctx,
+                        &request,
+                    )?;
 
-                write_transport.write_pdu(&response.encode()).await?;
+                    if let Some(full_request) = complete_request {
+                        // All fragments received - process the complete request
+                        let response =
+                            process_authenticated_request(&full_request, &interfaces, &mut ctx)
+                                .await;
+                        send_authenticated_response_fragmented(
+                            response,
+                            &mut ctx,
+                            &mut write_transport,
+                        )
+                        .await?;
+                    }
+                    // Otherwise, waiting for more fragments
+                }
             }
 
             Pdu::BindAck(_) | Pdu::Response(_) | Pdu::AlterContextResp(_) => {
@@ -599,6 +646,188 @@ async fn process_authenticated_request(
         Err(e) => {
             error!("Operation error: {}", e);
             Pdu::Fault(FaultPdu::new(call_id, FaultStatus::RpcError))
+        }
+    }
+}
+
+/// Handle a fragmented authenticated request, verifying/decrypting per-fragment.
+///
+/// Returns Some(RequestPdu) with complete plaintext when all fragments have been received,
+/// None if more fragments are expected.
+#[cfg(windows)]
+fn handle_authenticated_request_fragment(
+    ctx: &mut AuthConnectionContext,
+    request: &RequestPdu,
+) -> Result<Option<RequestPdu>> {
+    let call_id = request.header.call_id;
+    let is_first = request.header.packet_flags.is_first_frag();
+
+    // Verify/decrypt this fragment's stub data
+    let plaintext_stub = if let Some(ref mut sspi_context) = ctx.security_context {
+        let auth_level = ctx.auth_level.unwrap_or(AuthLevel::None);
+
+        if auth_level.requires_encryption() {
+            if let Some(ref auth_verifier) = request.auth_verifier {
+                sspi_context.decrypt(&request.stub_data, &auth_verifier.auth_value)
+                    .map_err(|e| RpcError::CallRejected(format!("Fragment decryption failed: {}", e)))?
+            } else {
+                return Err(RpcError::CallRejected("Missing auth verifier on encrypted fragment".to_string()));
+            }
+        } else if auth_level.requires_signing() {
+            if let Some(ref auth_verifier) = request.auth_verifier {
+                sspi_context.verify(&request.stub_data, &auth_verifier.auth_value)
+                    .map_err(|e| RpcError::CallRejected(format!("Fragment signature verification failed: {}", e)))?;
+                request.stub_data.clone()
+            } else {
+                return Err(RpcError::CallRejected("Missing auth verifier on signed fragment".to_string()));
+            }
+        } else {
+            request.stub_data.clone()
+        }
+    } else {
+        request.stub_data.clone()
+    };
+
+    // Get or create assembler for this call
+    let (assembler, accumulated) = if is_first {
+        // First fragment - create new assembler
+        ctx.request_assemblers.insert(
+            call_id,
+            (FragmentAssembler::new(call_id), Vec::new()),
+        );
+        ctx.request_assemblers.get_mut(&call_id).unwrap()
+    } else {
+        // Middle/last fragment - must have existing assembler
+        ctx.request_assemblers.get_mut(&call_id).ok_or_else(|| {
+            RpcError::FragmentOutOfOrder
+        })?
+    };
+
+    // Accumulate plaintext
+    accumulated.extend_from_slice(&plaintext_stub);
+
+    // Track fragment assembly (with empty stub - we track manually)
+    let complete = assembler.add_fragment(
+        &request.header,
+        &[], // We track plaintext separately
+        request.context_id,
+        Some(request.opnum),
+        request.alloc_hint,
+    )?;
+
+    if complete.is_some() {
+        // All fragments received - remove assembler and return complete request
+        let (asm, plaintext_data) = ctx.request_assemblers.remove(&call_id).unwrap();
+        let opnum = asm.opnum().unwrap_or(request.opnum);
+        let context_id = asm.context_id();
+
+        let mut full_request = RequestPdu::new(
+            call_id,
+            opnum,
+            bytes::Bytes::from(plaintext_data),
+        );
+        full_request.context_id = context_id;
+        full_request.object_uuid = request.object_uuid;
+
+        debug!(
+            "Reassembled authenticated request: call_id={}, opnum={}, total_stub_len={}",
+            call_id,
+            opnum,
+            full_request.stub_data.len()
+        );
+
+        Ok(Some(full_request))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Send a response, fragmenting and signing/sealing if necessary.
+#[cfg(windows)]
+async fn send_authenticated_response_fragmented<W: tokio::io::AsyncWrite + Unpin>(
+    response: Pdu,
+    ctx: &mut AuthConnectionContext,
+    write_transport: &mut DceRpcTransport<W>,
+) -> Result<()> {
+    match response {
+        Pdu::Response(resp) => {
+            let auth_level = ctx.auth_level.unwrap_or(AuthLevel::None);
+            let auth_type = ctx.auth_type.unwrap_or(AuthType::None);
+            let auth_len = if auth_level.requires_signing() {
+                crate::security::max_signature_size(auth_type) as u16
+            } else {
+                0
+            };
+            let max_stub = FragmentGenerator::max_stub_size(ctx.max_xmit_frag, auth_len, false);
+
+            if resp.stub_data.len() <= max_stub {
+                // Single fragment - sign/seal the whole response
+                let encoded = resp.encode();
+                write_transport.write_pdu(&encoded).await
+            } else {
+                // Multiple fragments - sign/seal per-fragment
+                // First, fragment the plaintext
+                let fragments = FragmentGenerator::fragment_response(&resp, ctx.max_xmit_frag);
+
+                debug!(
+                    "Sending {} authenticated response fragments for call_id={}",
+                    fragments.len(),
+                    resp.header.call_id
+                );
+
+                for mut frag in fragments {
+                    // Sign/seal this fragment
+                    if let Some(ref mut sspi_context) = ctx.security_context {
+                        if auth_level.requires_encryption() {
+                            match sspi_context.encrypt(&frag.stub_data) {
+                                Ok((encrypted, signature)) => {
+                                    frag.stub_data = encrypted;
+                                    frag.auth_verifier = Some(AuthVerifier::new(
+                                        auth_type,
+                                        auth_level,
+                                        ctx.auth_context_id,
+                                        signature,
+                                    ));
+                                }
+                                Err(e) => {
+                                    error!("Fragment encryption failed: {}", e);
+                                    return Err(RpcError::CallRejected(format!(
+                                        "Fragment encryption failed: {}",
+                                        e
+                                    )));
+                                }
+                            }
+                        } else if auth_level.requires_signing() {
+                            match sspi_context.sign(&frag.stub_data) {
+                                Ok(signature) => {
+                                    frag.auth_verifier = Some(AuthVerifier::new(
+                                        auth_type,
+                                        auth_level,
+                                        ctx.auth_context_id,
+                                        signature,
+                                    ));
+                                }
+                                Err(e) => {
+                                    error!("Fragment signing failed: {}", e);
+                                    return Err(RpcError::CallRejected(format!(
+                                        "Fragment signing failed: {}",
+                                        e
+                                    )));
+                                }
+                            }
+                        }
+                    }
+
+                    let encoded = frag.encode();
+                    write_transport.write_pdu(&encoded).await?;
+                }
+                Ok(())
+            }
+        }
+        // Non-response PDUs (faults) are never fragmented
+        other => {
+            let encoded = other.encode();
+            write_transport.write_pdu(&encoded).await
         }
     }
 }

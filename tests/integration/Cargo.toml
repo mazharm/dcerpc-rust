@@ -44,3 +44,7 @@ path = "src/circular_call_tests.rs"
 [[test]]
 name = "pipe_tests"
 path = "src/pipe_tests.rs"
+
+[[test]]
+name = "fragmentation_tests"
+path = "src/fragmentation_tests.rs"

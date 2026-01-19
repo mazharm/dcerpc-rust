@@ -6,7 +6,8 @@
 use crate::dcerpc::{Auth3Pdu, BindAckPdu, BindPdu, ContextResult, Pdu, RequestPdu, ResponsePdu, SyntaxId};
 use crate::dcerpc_transport::DceRpcTransport;
 use crate::error::{Result, RpcError};
-use crate::security::{AuthLevel, AuthType};
+use crate::fragmentation::{FragmentAssembler, FragmentGenerator};
+use crate::security::{AuthLevel, AuthType, AuthVerifier};
 use bytes::Bytes;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -222,6 +223,11 @@ impl AuthenticatedDceRpcClient {
     ///
     /// For AuthLevel::PktIntegrity, the stub data is signed.
     /// For AuthLevel::PktPrivacy, the stub data is encrypted.
+    ///
+    /// # Fragmentation
+    /// If the stub data exceeds the negotiated `max_xmit_frag` limit,
+    /// the request is automatically split into multiple fragments.
+    /// Each fragment is independently signed/sealed.
     pub async fn call(&self, opnum: u16, stub_data: Bytes) -> Result<Bytes> {
         if !self.is_bound {
             return Err(RpcError::CallRejected("not bound".to_string()));
@@ -229,6 +235,37 @@ impl AuthenticatedDceRpcClient {
 
         let call_id = self.call_id_counter.fetch_add(1, Ordering::SeqCst);
 
+        // Calculate max stub size considering auth overhead
+        let auth_len = if self.auth_level.requires_signing() {
+            // Estimate auth token size (typically 16-32 bytes for NTLM/Kerberos signatures)
+            crate::security::max_signature_size(self.auth_type) as u16
+        } else {
+            0
+        };
+        let max_stub = FragmentGenerator::max_stub_size(self.max_xmit_frag, auth_len, false);
+
+        // Check if we need to fragment
+        if stub_data.len() > max_stub {
+            debug!(
+                "Fragmenting authenticated request: call_id={}, opnum={}, stub_len={}, max_stub={}",
+                call_id,
+                opnum,
+                stub_data.len(),
+                max_stub
+            );
+            self.send_fragmented_authenticated_request(call_id, opnum, stub_data).await
+        } else {
+            self.send_single_authenticated_request(call_id, opnum, stub_data).await
+        }
+    }
+
+    /// Send a single (non-fragmented) authenticated request
+    async fn send_single_authenticated_request(
+        &self,
+        call_id: u32,
+        opnum: u16,
+        stub_data: Bytes,
+    ) -> Result<Bytes> {
         // Process stub data based on auth level
         let (processed_stub, auth_token) = if self.auth_level.requires_signing() {
             self.sign_or_seal_stub(&stub_data).await?
@@ -264,46 +301,149 @@ impl AuthenticatedDceRpcClient {
             write.write_pdu(&request.encode()).await?;
         }
 
-        // Read response
-        let pdu = {
-            let mut read = self.read_transport.lock().await;
-            read.read_pdu_decoded().await?
-        };
+        // Receive response (possibly fragmented)
+        self.receive_authenticated_response(call_id).await
+    }
 
-        match pdu {
-            Pdu::Response(response) => {
-                if response.header.call_id != call_id {
-                    return Err(RpcError::XidMismatch {
-                        expected: call_id,
-                        got: response.header.call_id,
-                    });
+    /// Send a fragmented authenticated request
+    ///
+    /// Each fragment is independently signed/sealed.
+    async fn send_fragmented_authenticated_request(
+        &self,
+        call_id: u32,
+        opnum: u16,
+        stub_data: Bytes,
+    ) -> Result<Bytes> {
+        // Create base request
+        let mut request = RequestPdu::new(call_id, opnum, stub_data);
+        request.context_id = self.context_id;
+
+        // Generate fragments (without auth - we'll add auth per-fragment)
+        let fragments = FragmentGenerator::fragment_request(&request, self.max_xmit_frag);
+
+        debug!(
+            "Sending {} authenticated fragments for call_id={}, opnum={}",
+            fragments.len(),
+            call_id,
+            opnum
+        );
+
+        // Send all fragments with per-fragment signing/sealing
+        {
+            let mut write = self.write_transport.lock().await;
+
+            for (i, mut frag) in fragments.into_iter().enumerate() {
+                // Sign/seal this fragment's stub data
+                if self.auth_level.requires_signing() {
+                    let (processed_stub, auth_token) =
+                        self.sign_or_seal_stub(&frag.stub_data).await?;
+
+                    frag.stub_data = processed_stub;
+                    frag.auth_verifier = Some(AuthVerifier::new(
+                        self.auth_type,
+                        self.auth_level,
+                        self.auth_context_id,
+                        auth_token,
+                    ));
                 }
 
-                // Verify/decrypt stub data if auth level requires it
-                let result_stub = if self.auth_level.requires_signing() {
-                    self.verify_or_unseal_stub(&response).await?
-                } else {
-                    response.stub_data
-                };
+                trace!(
+                    "Sending authenticated fragment {}: stub_len={}, first={}, last={}",
+                    i + 1,
+                    frag.stub_data.len(),
+                    frag.header.packet_flags.is_first_frag(),
+                    frag.header.packet_flags.is_last_frag()
+                );
 
-                trace!("Authenticated call succeeded: {} bytes result", result_stub.len());
-
-                Ok(result_stub)
+                write.write_pdu(&frag.encode()).await?;
             }
-            Pdu::Fault(fault) => {
-                if fault.header.call_id != call_id {
-                    return Err(RpcError::XidMismatch {
-                        expected: call_id,
-                        got: fault.header.call_id,
-                    });
+        }
+
+        // Receive response (possibly fragmented)
+        self.receive_authenticated_response(call_id).await
+    }
+
+    /// Receive an authenticated response, handling fragmentation if needed
+    async fn receive_authenticated_response(&self, call_id: u32) -> Result<Bytes> {
+        let mut read = self.read_transport.lock().await;
+        let mut assembler: Option<FragmentAssembler> = None;
+        let mut accumulated_plaintext = Vec::new();
+
+        loop {
+            let pdu = read.read_pdu_decoded().await?;
+
+            match pdu {
+                Pdu::Response(response) => {
+                    if response.header.call_id != call_id {
+                        return Err(RpcError::XidMismatch {
+                            expected: call_id,
+                            got: response.header.call_id,
+                        });
+                    }
+
+                    let is_first = response.header.packet_flags.is_first_frag();
+                    let is_last = response.header.packet_flags.is_last_frag();
+
+                    // Verify/decrypt this fragment's stub data
+                    let plaintext_stub = if self.auth_level.requires_signing() {
+                        self.verify_or_unseal_stub(&response).await?
+                    } else {
+                        response.stub_data.clone()
+                    };
+
+                    // Check if this is a complete (non-fragmented) response
+                    if is_first && is_last {
+                        trace!(
+                            "Authenticated call succeeded: {} bytes result",
+                            plaintext_stub.len()
+                        );
+                        return Ok(plaintext_stub);
+                    }
+
+                    // Handle fragmented response - accumulate plaintext
+                    accumulated_plaintext.extend_from_slice(&plaintext_stub);
+
+                    // Track fragment assembly for completion detection
+                    let asm = assembler.get_or_insert_with(|| FragmentAssembler::new(call_id));
+
+                    // Use empty stub for tracking (we already accumulated the plaintext)
+                    if let Some(_) = asm.add_fragment(
+                        &response.header,
+                        &[], // We track completion but don't reassemble here
+                        response.context_id,
+                        None,
+                        response.alloc_hint,
+                    )? {
+                        // All fragments received
+                        let complete = Bytes::from(accumulated_plaintext);
+                        trace!(
+                            "Reassembled authenticated response: {} bytes",
+                            complete.len()
+                        );
+                        return Ok(complete);
+                    }
+
+                    trace!(
+                        "Received authenticated response fragment: first={}, last={}",
+                        is_first,
+                        is_last
+                    );
                 }
+                Pdu::Fault(fault) => {
+                    if fault.header.call_id != call_id {
+                        return Err(RpcError::XidMismatch {
+                            expected: call_id,
+                            got: fault.header.call_id,
+                        });
+                    }
 
-                Err(RpcError::CallRejected(format!(
-                    "fault: status=0x{:08x}",
-                    fault.status
-                )))
+                    return Err(RpcError::CallRejected(format!(
+                        "fault: status=0x{:08x}",
+                        fault.status
+                    )));
+                }
+                _ => return Err(RpcError::InvalidMessageType(0)),
             }
-            _ => Err(RpcError::InvalidMessageType(0)),
         }
     }
 

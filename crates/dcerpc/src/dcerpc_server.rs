@@ -17,6 +17,7 @@ use crate::dcerpc::{
 };
 use crate::dcerpc_transport::DceRpcTransport;
 use crate::error::{Result, RpcError};
+use crate::fragmentation::{FragmentAssembler, FragmentGenerator};
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::future::Future;
@@ -343,6 +344,8 @@ impl Default for DceRpcServer {
 /// Per-connection context
 struct ConnectionContext {
     bound_context: Option<BoundContext>,
+    /// Fragment assemblers for incoming fragmented requests (keyed by call_id)
+    request_assemblers: HashMap<u32, FragmentAssembler>,
 }
 
 struct BoundContext {
@@ -368,6 +371,7 @@ async fn handle_connection(
 
     let mut ctx = ConnectionContext {
         bound_context: None,
+        request_assemblers: HashMap::new(),
     };
 
     let ndr_syntax = SyntaxId::new(
@@ -408,18 +412,50 @@ async fn handle_connection(
             }
 
             Pdu::Request(request) => {
+                let call_id = request.header.call_id;
+                let is_first = request.header.packet_flags.is_first_frag();
+                let is_last = request.header.packet_flags.is_last_frag();
+
                 debug!(
-                    "Received request: call_id={}, opnum={}, stub_len={}",
-                    request.header.call_id,
+                    "Received request: call_id={}, opnum={}, stub_len={}, first={}, last={}",
+                    call_id,
                     request.opnum,
-                    request.stub_data.len()
+                    request.stub_data.len(),
+                    is_first,
+                    is_last
                 );
 
-                let response = process_request(&request, &interfaces, &ctx, stats).await;
+                // Check if this is a complete (non-fragmented) request
+                if is_first && is_last {
+                    // Complete request - process immediately
+                    let response = process_request(&request, &interfaces, &ctx, stats).await;
+                    send_response_fragmented(
+                        response,
+                        max_xmit_frag,
+                        &mut write_transport,
+                        stats,
+                    )
+                    .await?;
+                } else {
+                    // Fragmented request - accumulate
+                    let complete_request = handle_request_fragment(
+                        &mut ctx.request_assemblers,
+                        &request,
+                    )?;
 
-                let encoded = response.encode();
-                stats.bytes_sent.fetch_add(encoded.len() as u64, Ordering::Relaxed);
-                write_transport.write_pdu(&encoded).await?;
+                    if let Some(full_request) = complete_request {
+                        // All fragments received - process the complete request
+                        let response = process_request(&full_request, &interfaces, &ctx, stats).await;
+                        send_response_fragmented(
+                            response,
+                            max_xmit_frag,
+                            &mut write_transport,
+                            stats,
+                        )
+                        .await?;
+                    }
+                    // Otherwise, waiting for more fragments
+                }
             }
 
             Pdu::BindAck(_) | Pdu::Response(_) => {
@@ -559,6 +595,106 @@ async fn process_request(
             error!("Operation error: {}", e);
             stats.requests_failed.fetch_add(1, Ordering::Relaxed);
             Pdu::Fault(FaultPdu::new(call_id, FaultStatus::RpcError))
+        }
+    }
+}
+
+/// Handle a fragmented request, accumulating fragments until complete.
+///
+/// Returns Some(RequestPdu) when all fragments have been received,
+/// None if more fragments are expected.
+fn handle_request_fragment(
+    assemblers: &mut HashMap<u32, FragmentAssembler>,
+    request: &RequestPdu,
+) -> Result<Option<RequestPdu>> {
+    let call_id = request.header.call_id;
+    let is_first = request.header.packet_flags.is_first_frag();
+
+    // Get or create assembler for this call
+    let assembler = if is_first {
+        // First fragment - create new assembler
+        assemblers.insert(call_id, FragmentAssembler::new(call_id));
+        assemblers.get_mut(&call_id).unwrap()
+    } else {
+        // Middle/last fragment - must have existing assembler
+        assemblers.get_mut(&call_id).ok_or_else(|| {
+            RpcError::FragmentOutOfOrder
+        })?
+    };
+
+    // Add fragment
+    let complete = assembler.add_fragment(
+        &request.header,
+        &request.stub_data,
+        request.context_id,
+        Some(request.opnum),
+        request.alloc_hint,
+    )?;
+
+    if let Some(complete_stub) = complete {
+        // Get the opnum and context_id from the assembler (stored from first fragment)
+        let opnum = assembler.opnum().unwrap_or(request.opnum);
+        let context_id = assembler.context_id();
+
+        // All fragments received - remove assembler and return complete request
+        assemblers.remove(&call_id);
+
+        let mut full_request = RequestPdu::new(call_id, opnum, complete_stub);
+        full_request.context_id = context_id;
+        full_request.object_uuid = request.object_uuid;
+
+        debug!(
+            "Reassembled request: call_id={}, opnum={}, total_stub_len={}",
+            call_id,
+            opnum,
+            full_request.stub_data.len()
+        );
+
+        Ok(Some(full_request))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Send a response, fragmenting if necessary based on max_xmit_frag.
+async fn send_response_fragmented<W: tokio::io::AsyncWrite + Unpin>(
+    response: Pdu,
+    max_xmit_frag: u16,
+    write_transport: &mut DceRpcTransport<W>,
+    stats: &Arc<ServerStats>,
+) -> Result<()> {
+    match response {
+        Pdu::Response(resp) => {
+            let max_stub = FragmentGenerator::max_stub_size(max_xmit_frag, 0, false);
+
+            if resp.stub_data.len() <= max_stub {
+                // Single fragment
+                let encoded = resp.encode();
+                stats.bytes_sent.fetch_add(encoded.len() as u64, Ordering::Relaxed);
+                write_transport.write_pdu(&encoded).await
+            } else {
+                // Multiple fragments
+                let fragments = FragmentGenerator::fragment_response(&resp, max_xmit_frag);
+
+                debug!(
+                    "Sending {} response fragments for call_id={}",
+                    fragments.len(),
+                    resp.header.call_id
+                );
+
+                for frag in fragments {
+                    let encoded = frag.encode();
+                    stats.bytes_sent.fetch_add(encoded.len() as u64, Ordering::Relaxed);
+                    write_transport.write_pdu(&encoded).await?;
+                }
+                Ok(())
+            }
+        }
+        // Non-response PDUs (faults) are never fragmented
+        other => {
+            let encoded = other.encode();
+            stats.bytes_sent.fetch_add(encoded.len() as u64, Ordering::Relaxed);
+            write_transport.write_pdu(&encoded).await
         }
     }
 }

@@ -45,6 +45,11 @@ const TEST_CATEGORIES: &[TestCategory] = &[
         test_name: "stress_tests",
     },
     TestCategory {
+        name: "Fragmentation Tests",
+        description: "Large PDU transfer with multi-fragment support",
+        test_name: "fragmentation_tests",
+    },
+    TestCategory {
         name: "Apartment Tests",
         description: "MTA and STA threading models for DCOM",
         test_name: "apartment_tests",
