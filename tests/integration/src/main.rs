@@ -28,7 +28,6 @@ mod common;
 
 use std::process::Command;
 use std::time::{Duration, Instant};
-use common::TestSuiteResults;
 
 /// Test category
 #[derive(Debug, Clone)]

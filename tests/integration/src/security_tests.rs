@@ -28,9 +28,7 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut, BufMut};
 
 use common::*;
-use dcerpc::{
-    DceRpcServer, DceRpcServerConfig, Interface, InterfaceBuilder, SyntaxId, Uuid,
-};
+use dcerpc::{Interface, InterfaceBuilder, SyntaxId, Uuid};
 
 #[cfg(windows)]
 use dcerpc::{

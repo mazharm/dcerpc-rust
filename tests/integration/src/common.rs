@@ -6,19 +6,18 @@
 //! - Logging initialization
 //! - Test result collection
 
-use std::collections::HashMap;
+#![allow(dead_code)] // Test utilities may not all be used in every test file
+
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::{Bytes, BytesMut, Buf, BufMut};
-use parking_lot::RwLock;
 use tokio::sync::Semaphore;
-use tracing::{info, warn, Level};
+use tracing::Level;
 
 use dcerpc::{DceRpcClient, DceRpcServer, Interface, InterfaceBuilder, SyntaxId, Uuid};
-use midl_ndr::{NdrContext, NdrEncode, NdrDecode};
+use midl_ndr::NdrContext;
 
 /// Base port for test servers (incremented for each test)
 static NEXT_PORT: AtomicU16 = AtomicU16::new(10000);
@@ -387,14 +386,12 @@ impl ConcurrentStats {
 /// Rate limiter for controlled concurrency testing
 pub struct RateLimiter {
     semaphore: Semaphore,
-    max_concurrent: usize,
 }
 
 impl RateLimiter {
     pub fn new(max_concurrent: usize) -> Self {
         Self {
             semaphore: Semaphore::new(max_concurrent),
-            max_concurrent,
         }
     }
 
@@ -416,7 +413,7 @@ impl TestDataGenerator {
     /// Generate random bytes of given length
     pub fn random_bytes(&mut self, len: usize) -> Bytes {
         let mut data = Vec::with_capacity(len);
-        for i in 0..len {
+        for _ in 0..len {
             self.rng_seed = self.rng_seed.wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
             data.push((self.rng_seed >> 33) as u8);
@@ -518,7 +515,7 @@ impl ComplexTestData {
         if cursor.remaining() < 12 {
             return None;
         }
-        let max_count = ctx.get_u32(&mut cursor) as usize;
+        let _max_count = ctx.get_u32(&mut cursor) as usize;
         let _offset = ctx.get_u32(&mut cursor);
         let actual_count = ctx.get_u32(&mut cursor) as usize;
 
