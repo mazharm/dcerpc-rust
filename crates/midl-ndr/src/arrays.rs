@@ -131,6 +131,8 @@ impl<T: NdrEncode> NdrEncode for ConformantArray<T> {
 
 impl<T: NdrDecode> NdrDecode for ConformantArray<T> {
     fn ndr_decode<B: Buf>(buf: &mut B, ctx: &NdrContext, position: &mut usize) -> Result<Self> {
+        use crate::error::MAX_NDR_ARRAY_ELEMENTS;
+
         // Align for max_count
         let padding = NdrContext::align_padding(*position, 4);
         if buf.remaining() < padding + 4 {
@@ -145,6 +147,14 @@ impl<T: NdrDecode> NdrDecode for ConformantArray<T> {
         // Read max_count
         let max_count = ctx.get_u32(buf) as usize;
         *position += 4;
+
+        // Validate allocation size to prevent memory exhaustion
+        if max_count > MAX_NDR_ARRAY_ELEMENTS {
+            return Err(NdrError::AllocationLimitExceeded {
+                requested: max_count,
+                limit: MAX_NDR_ARRAY_ELEMENTS,
+            });
+        }
 
         // Read elements
         let mut elements = Vec::with_capacity(max_count);
@@ -361,6 +371,8 @@ impl<T: NdrEncode> NdrEncode for ConformantVaryingArray<T> {
 
 impl<T: NdrDecode> NdrDecode for ConformantVaryingArray<T> {
     fn ndr_decode<B: Buf>(buf: &mut B, ctx: &NdrContext, position: &mut usize) -> Result<Self> {
+        use crate::error::MAX_NDR_ARRAY_ELEMENTS;
+
         // Align for max_count
         let padding = NdrContext::align_padding(*position, 4);
         if buf.remaining() < padding + 12 {
@@ -377,10 +389,20 @@ impl<T: NdrDecode> NdrDecode for ConformantVaryingArray<T> {
         let actual_count = ctx.get_u32(buf) as usize;
         *position += 12;
 
-        if offset + actual_count > max_count {
+        // Validate allocation size to prevent memory exhaustion
+        if actual_count > MAX_NDR_ARRAY_ELEMENTS {
+            return Err(NdrError::AllocationLimitExceeded {
+                requested: actual_count,
+                limit: MAX_NDR_ARRAY_ELEMENTS,
+            });
+        }
+
+        // Check for integer overflow in offset + actual_count
+        let total_count = offset.checked_add(actual_count).ok_or(NdrError::IntegerOverflow)?;
+        if total_count > max_count {
             return Err(NdrError::ConformanceMismatch {
                 max_count: max_count as u32,
-                actual_count: (offset + actual_count) as u32,
+                actual_count: total_count as u32,
             });
         }
 

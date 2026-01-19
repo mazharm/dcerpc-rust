@@ -2,6 +2,14 @@
 
 use thiserror::Error;
 
+/// Maximum allocation size in bytes (64 MB default)
+/// This prevents memory exhaustion attacks from malformed input.
+pub const MAX_NDR_ALLOCATION_SIZE: usize = 64 * 1024 * 1024;
+
+/// Maximum array element count
+/// Based on MAX_NDR_ALLOCATION_SIZE / minimum element size (1 byte)
+pub const MAX_NDR_ARRAY_ELEMENTS: usize = MAX_NDR_ALLOCATION_SIZE;
+
 /// NDR encoding/decoding errors
 #[derive(Debug, Error)]
 pub enum NdrError {
@@ -36,6 +44,14 @@ pub enum NdrError {
     /// Conformance mismatch
     #[error("conformance mismatch: max_count={max_count}, actual_count={actual_count}")]
     ConformanceMismatch { max_count: u32, actual_count: u32 },
+
+    /// Allocation limit exceeded - prevents memory exhaustion attacks
+    #[error("allocation limit exceeded: requested {requested} elements, limit {limit}")]
+    AllocationLimitExceeded { requested: usize, limit: usize },
+
+    /// Integer overflow during size calculation
+    #[error("integer overflow during size calculation")]
+    IntegerOverflow,
 
     /// UTF-8 decoding error
     #[error("UTF-8 error: {0}")]

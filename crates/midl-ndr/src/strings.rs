@@ -104,6 +104,8 @@ impl NdrEncode for NdrString {
 
 impl NdrDecode for NdrString {
     fn ndr_decode<B: Buf>(buf: &mut B, ctx: &NdrContext, position: &mut usize) -> Result<Self> {
+        use crate::error::MAX_NDR_ALLOCATION_SIZE;
+
         // Align to 4 bytes
         let padding = NdrContext::align_padding(*position, 4);
         if buf.remaining() < padding + 12 {
@@ -128,6 +130,14 @@ impl NdrDecode for NdrString {
             return Err(NdrError::ConformanceMismatch {
                 max_count: max_count as u32,
                 actual_count: actual_count as u32,
+            });
+        }
+
+        // Validate allocation size to prevent memory exhaustion
+        if actual_count > MAX_NDR_ALLOCATION_SIZE {
+            return Err(NdrError::AllocationLimitExceeded {
+                requested: actual_count,
+                limit: MAX_NDR_ALLOCATION_SIZE,
             });
         }
 
@@ -259,6 +269,8 @@ impl NdrEncode for NdrWString {
 
 impl NdrDecode for NdrWString {
     fn ndr_decode<B: Buf>(buf: &mut B, ctx: &NdrContext, position: &mut usize) -> Result<Self> {
+        use crate::error::MAX_NDR_ALLOCATION_SIZE;
+
         // Align to 4 bytes
         let padding = NdrContext::align_padding(*position, 4);
         if buf.remaining() < padding + 12 {
@@ -286,8 +298,17 @@ impl NdrDecode for NdrWString {
             });
         }
 
-        // Read UTF-16 code units
-        let byte_count = actual_count * 2;
+        // Validate allocation size to prevent memory exhaustion
+        // Each UTF-16 code unit is 2 bytes
+        if actual_count > MAX_NDR_ALLOCATION_SIZE / 2 {
+            return Err(NdrError::AllocationLimitExceeded {
+                requested: actual_count,
+                limit: MAX_NDR_ALLOCATION_SIZE / 2,
+            });
+        }
+
+        // Read UTF-16 code units (use checked_mul for safety)
+        let byte_count = actual_count.checked_mul(2).ok_or(NdrError::IntegerOverflow)?;
         if buf.remaining() < byte_count {
             return Err(NdrError::BufferUnderflow {
                 needed: byte_count,

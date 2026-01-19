@@ -36,8 +36,8 @@ pub struct SinglethreadedApartment {
     objects: Arc<RwLock<HashMap<Oid, Arc<dyn ComObject>>>>,
     /// Message sender
     sender: Mutex<Option<mpsc::Sender<StaMessage>>>,
-    /// Running flag
-    running: AtomicBool,
+    /// Running flag (wrapped in Arc for sharing with message loop task)
+    running: Arc<AtomicBool>,
 }
 
 impl SinglethreadedApartment {
@@ -47,7 +47,7 @@ impl SinglethreadedApartment {
             id: ApartmentId::generate(),
             objects: Arc::new(RwLock::new(HashMap::new())),
             sender: Mutex::new(None),
-            running: AtomicBool::new(true),
+            running: Arc::new(AtomicBool::new(true)),
         };
 
         sta.start_message_loop();
@@ -60,7 +60,7 @@ impl SinglethreadedApartment {
             id,
             objects: Arc::new(RwLock::new(HashMap::new())),
             sender: Mutex::new(None),
-            running: AtomicBool::new(true),
+            running: Arc::new(AtomicBool::new(true)),
         };
 
         sta.start_message_loop();
@@ -73,11 +73,12 @@ impl SinglethreadedApartment {
         *self.sender.lock().unwrap() = Some(tx);
 
         let objects = self.objects.clone();
-        let running = self.running.load(Ordering::SeqCst);
+        let running = self.running.clone(); // Clone the Arc, not the value
 
         tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
-                if !running {
+                // Check the running flag on each iteration (reads from shared AtomicBool)
+                if !running.load(Ordering::SeqCst) {
                     let _ = msg.response.send(Err(DcomError::ApartmentError(
                         "apartment shutdown".to_string(),
                     )));

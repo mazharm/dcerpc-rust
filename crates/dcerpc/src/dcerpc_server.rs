@@ -375,7 +375,9 @@ async fn handle_connection(
     };
 
     let ndr_syntax = SyntaxId::new(
-        Uuid::parse(NDR_SYNTAX_UUID).unwrap(),
+        Uuid::parse(NDR_SYNTAX_UUID).ok_or_else(|| {
+            RpcError::InvalidPduData("Invalid NDR_SYNTAX_UUID constant".to_string())
+        })?,
         NDR_SYNTAX_VERSION as u16,
         0,
     );
@@ -612,9 +614,10 @@ fn handle_request_fragment(
 
     // Get or create assembler for this call
     let assembler = if is_first {
-        // First fragment - create new assembler
-        assemblers.insert(call_id, FragmentAssembler::new(call_id));
-        assemblers.get_mut(&call_id).unwrap()
+        // First fragment - create new assembler using entry() to avoid extra lookup
+        assemblers
+            .entry(call_id)
+            .or_insert_with(|| FragmentAssembler::new(call_id))
     } else {
         // Middle/last fragment - must have existing assembler
         assemblers.get_mut(&call_id).ok_or_else(|| {

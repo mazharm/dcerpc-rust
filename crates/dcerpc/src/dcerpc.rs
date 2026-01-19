@@ -672,7 +672,7 @@ pub struct BindPdu {
 impl BindPdu {
     pub fn new(call_id: u32, interface: SyntaxId) -> Self {
         let ndr_syntax = SyntaxId::new(
-            Uuid::parse(NDR_SYNTAX_UUID).unwrap(),
+            Uuid::parse(NDR_SYNTAX_UUID).expect("NDR_SYNTAX_UUID is a valid UUID constant"),
             NDR_SYNTAX_VERSION as u16,
             0,
         );

@@ -172,6 +172,7 @@ dependencies = [
  "bytes",
  "dcerpc",
  "futures",
+ "parking_lot",
  "thiserror",
  "tokio",
  "tokio-test",

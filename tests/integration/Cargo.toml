@@ -48,3 +48,7 @@ path = "src/pipe_tests.rs"
 [[test]]
 name = "fragmentation_tests"
 path = "src/fragmentation_tests.rs"
+
+[[test]]
+name = "security_tests"
+path = "src/security_tests.rs"

@@ -238,7 +238,9 @@ async fn handle_authenticated_connection(
     };
 
     let ndr_syntax = SyntaxId::new(
-        Uuid::parse(NDR_SYNTAX_UUID).unwrap(),
+        Uuid::parse(NDR_SYNTAX_UUID).ok_or_else(|| {
+            RpcError::InvalidPduData("Invalid NDR_SYNTAX_UUID constant".to_string())
+        })?,
         NDR_SYNTAX_VERSION as u16,
         0,
     );
@@ -691,11 +693,9 @@ fn handle_authenticated_request_fragment(
     // Get or create assembler for this call
     let (assembler, accumulated) = if is_first {
         // First fragment - create new assembler
-        ctx.request_assemblers.insert(
-            call_id,
-            (FragmentAssembler::new(call_id), Vec::new()),
-        );
-        ctx.request_assemblers.get_mut(&call_id).unwrap()
+        ctx.request_assemblers
+            .entry(call_id)
+            .or_insert_with(|| (FragmentAssembler::new(call_id), Vec::new()))
     } else {
         // Middle/last fragment - must have existing assembler
         ctx.request_assemblers.get_mut(&call_id).ok_or_else(|| {
@@ -717,7 +717,12 @@ fn handle_authenticated_request_fragment(
 
     if complete.is_some() {
         // All fragments received - remove assembler and return complete request
-        let (asm, plaintext_data) = ctx.request_assemblers.remove(&call_id).unwrap();
+        let (asm, plaintext_data) = ctx.request_assemblers.remove(&call_id).ok_or_else(|| {
+            RpcError::FragmentAssemblyError(format!(
+                "Assembler for call_id {} disappeared during reassembly",
+                call_id
+            ))
+        })?;
         let opnum = asm.opnum().unwrap_or(request.opnum);
         let context_id = asm.context_id();
 

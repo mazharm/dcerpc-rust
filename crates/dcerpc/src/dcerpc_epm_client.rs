@@ -92,7 +92,7 @@ impl EpmClient {
         annotation: &str,
     ) -> Result<()> {
         let ndr = SyntaxId::new(
-            Uuid::parse(NDR_SYNTAX_UUID).unwrap(),
+            Uuid::parse(NDR_SYNTAX_UUID).expect("NDR_SYNTAX_UUID is a valid UUID constant"),
             NDR_SYNTAX_VERSION as u16,
             0,
         );
@@ -117,7 +117,7 @@ impl EpmClient {
         annotation: &str,
     ) -> Result<()> {
         let ndr = SyntaxId::new(
-            Uuid::parse(NDR_SYNTAX_UUID).unwrap(),
+            Uuid::parse(NDR_SYNTAX_UUID).expect("NDR_SYNTAX_UUID is a valid UUID constant"),
             NDR_SYNTAX_VERSION as u16,
             0,
         );
@@ -279,7 +279,7 @@ impl EpmClient {
         interface_version: u16,
     ) -> Result<Option<(Ipv4Addr, u16, bool)>> {
         let ndr = SyntaxId::new(
-            Uuid::parse(NDR_SYNTAX_UUID).unwrap(),
+            Uuid::parse(NDR_SYNTAX_UUID).expect("NDR_SYNTAX_UUID is a valid UUID constant"),
             NDR_SYNTAX_VERSION as u16,
             0,
         );
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn test_epm_entry_creation() {
         let uuid = Uuid::parse("12345678-1234-1234-1234-123456789012").unwrap();
-        let ndr = SyntaxId::new(Uuid::parse(NDR_SYNTAX_UUID).unwrap(), 2, 0);
+        let ndr = SyntaxId::new(Uuid::parse(NDR_SYNTAX_UUID).expect("NDR_SYNTAX_UUID is a valid UUID constant"), 2, 0);
 
         let entry = EpmEntry::tcp(&uuid, 1, &ndr, 12346, [127, 0, 0, 1], "Test");
         assert_eq!(entry.annotation, "Test");

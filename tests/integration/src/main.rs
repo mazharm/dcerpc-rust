@@ -50,6 +50,11 @@ const TEST_CATEGORIES: &[TestCategory] = &[
         test_name: "fragmentation_tests",
     },
     TestCategory {
+        name: "Security Tests",
+        description: "MSRPC and DCOM authentication, signing, encryption",
+        test_name: "security_tests",
+    },
+    TestCategory {
         name: "Apartment Tests",
         description: "MTA and STA threading models for DCOM",
         test_name: "apartment_tests",

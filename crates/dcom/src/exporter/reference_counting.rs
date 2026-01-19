@@ -4,7 +4,7 @@
 //! Objects are kept alive as long as there are references from remote clients.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use crate::types::{Oid, Ipid, Result, DcomError};
 
 /// Reference count entry for an interface
@@ -61,13 +61,13 @@ impl RefCountManager {
 
     /// Register a new interface for reference counting
     pub fn register(&self, ipid: Ipid, oid: Oid) {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
         entries.insert(ipid, RefCountEntry::new(ipid, oid));
     }
 
     /// Add public references (from RemAddRef)
     pub fn add_public_refs(&self, ipid: &Ipid, count: u32, client_id: Option<u64>) -> Result<u32> {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
         let entry = entries
             .get_mut(ipid)
             .ok_or_else(|| DcomError::InterfaceNotFound(ipid.to_string()))?;
@@ -88,7 +88,7 @@ impl RefCountManager {
         count: u32,
         client_id: Option<u64>,
     ) -> Result<(u32, bool)> {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
         let entry = entries
             .get_mut(ipid)
             .ok_or_else(|| DcomError::InterfaceNotFound(ipid.to_string()))?;
@@ -110,7 +110,7 @@ impl RefCountManager {
 
     /// Add a private reference (local)
     pub fn add_private_ref(&self, ipid: &Ipid) -> Result<u32> {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
         let entry = entries
             .get_mut(ipid)
             .ok_or_else(|| DcomError::InterfaceNotFound(ipid.to_string()))?;
@@ -121,7 +121,7 @@ impl RefCountManager {
 
     /// Release a private reference (local)
     pub fn release_private_ref(&self, ipid: &Ipid) -> Result<(u32, bool)> {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
         let entry = entries
             .get_mut(ipid)
             .ok_or_else(|| DcomError::InterfaceNotFound(ipid.to_string()))?;
@@ -133,19 +133,19 @@ impl RefCountManager {
 
     /// Get the current reference counts
     pub fn get_counts(&self, ipid: &Ipid) -> Option<(u32, u32)> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read();
         entries.get(ipid).map(|e| (e.public_refs, e.private_refs))
     }
 
     /// Remove an entry
     pub fn remove(&self, ipid: &Ipid) -> Option<RefCountEntry> {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
         entries.remove(ipid)
     }
 
     /// Get all IPIDs with zero references
     pub fn get_zero_ref_ipids(&self) -> Vec<Ipid> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read();
         entries
             .values()
             .filter(|e| e.should_release())
@@ -155,7 +155,7 @@ impl RefCountManager {
 
     /// Release all references for a specific client
     pub fn release_client_refs(&self, client_id: u64) -> Vec<(Ipid, bool)> {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
         let mut results = Vec::new();
 
         for entry in entries.values_mut() {

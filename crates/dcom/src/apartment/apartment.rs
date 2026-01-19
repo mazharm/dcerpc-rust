@@ -6,22 +6,24 @@ use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use bytes::Bytes;
 use crate::types::{Result, Ipid, Oid, OrpcThis, OrpcThat};
+
+/// Global counter for generating unique apartment IDs
+static APARTMENT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Unique identifier for an apartment
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ApartmentId(pub u64);
 
 impl ApartmentId {
-    /// Generate a new apartment ID
+    /// Generate a new unique apartment ID
+    ///
+    /// Uses an atomic counter to ensure uniqueness even when called
+    /// concurrently from multiple threads.
     pub fn generate() -> Self {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
-        Self(timestamp)
+        Self(APARTMENT_ID_COUNTER.fetch_add(1, Ordering::Relaxed))
     }
 }
 

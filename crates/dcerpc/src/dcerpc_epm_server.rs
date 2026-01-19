@@ -359,11 +359,11 @@ impl EpmServer {
     /// Pre-register the EPM itself
     pub async fn register_self(&self, tcp_port: u16, udp_port: u16, ip_addr: [u8; 4]) {
         let ndr = SyntaxId::new(
-            Uuid::parse(NDR_SYNTAX_UUID).unwrap(),
+            Uuid::parse(NDR_SYNTAX_UUID).expect("NDR_SYNTAX_UUID is a valid UUID constant"),
             NDR_SYNTAX_VERSION as u16,
             0,
         );
-        let epm_uuid = Uuid::parse(EPM_INTERFACE_UUID).unwrap();
+        let epm_uuid = Uuid::parse(EPM_INTERFACE_UUID).expect("EPM_INTERFACE_UUID is a valid UUID constant");
 
         let mut reg = self.registry.write().await;
 
