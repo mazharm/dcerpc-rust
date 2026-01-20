@@ -264,10 +264,12 @@ impl<T: NdrDecode, const N: usize> NdrDecode for VaryingArray<T, N> {
         let actual_count = ctx.get_u32(buf) as usize;
         *position += 8;
 
-        if offset + actual_count > N {
+        // Check for integer overflow in offset + actual_count
+        let total_count = offset.checked_add(actual_count).ok_or(NdrError::IntegerOverflow)?;
+        if total_count > N {
             return Err(NdrError::ArraySizeMismatch {
                 expected: N,
-                got: offset + actual_count,
+                got: total_count,
             });
         }
 
@@ -524,5 +526,49 @@ mod tests {
         let decoded: ConformantArray<u32> = ConformantArray::ndr_decode(&mut reader, &ctx, &mut pos).unwrap();
 
         assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_varying_array_integer_overflow_protection() {
+        // Test that integer overflow in offset + actual_count is detected.
+        // This validates proper bounds checking: offset + actual_count must be <= N
+        let ctx = NdrContext::new();
+        let mut buf = BytesMut::new();
+
+        // Write values where offset + actual_count exceeds the array size N
+        ctx.put_u32(&mut buf, 90); // offset
+        ctx.put_u32(&mut buf, 20); // actual_count (offset + actual_count = 110 > 100)
+
+        let mut reader = buf.freeze();
+        let mut decode_pos = 0;
+        let result: Result<VaryingArray<u32, 100>> = VaryingArray::ndr_decode(&mut reader, &ctx, &mut decode_pos);
+
+        // Should return ArraySizeMismatch error
+        match result {
+            Err(NdrError::ArraySizeMismatch { expected: 100, got: 110 }) => {}, // Good!
+            other => panic!("Expected ArraySizeMismatch error with got=110, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_conformant_varying_array_overflow_detection() {
+        // Test that the overflow check works for conformant varying arrays
+        let ctx = NdrContext::new();
+        let mut buf = BytesMut::new();
+
+        // Write values where offset + actual_count > max_count
+        ctx.put_u32(&mut buf, 100); // max_count
+        ctx.put_u32(&mut buf, 90); // offset
+        ctx.put_u32(&mut buf, 20); // actual_count (offset + actual_count = 110 > 100)
+
+        let mut reader = buf.freeze();
+        let mut decode_pos = 0;
+        let result: Result<ConformantVaryingArray<u32>> = ConformantVaryingArray::ndr_decode(&mut reader, &ctx, &mut decode_pos);
+
+        // Should return ConformanceMismatch error
+        match result {
+            Err(NdrError::ConformanceMismatch { max_count: 100, actual_count: 110 }) => {}, // Good!
+            other => panic!("Expected ConformanceMismatch error, got {:?}", other),
+        }
     }
 }

@@ -10,7 +10,7 @@ mod common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BytesMut, BufMut};
 use futures::future::join_all;
 
 use common::*;
@@ -67,6 +67,8 @@ async fn start_frag_test_server(
         max_xmit_frag: max_frag,
         max_recv_frag: max_frag,
         max_concurrent_fragments: 100,
+        connection_timeout_secs: None, // No timeout for tests
+        idle_timeout_secs: None,
     };
 
     let server = Arc::new(DceRpcServer::with_config(config));
