@@ -77,6 +77,8 @@ pub struct DceRpcServerConfig {
     pub max_connections: usize,
     pub max_xmit_frag: u16,
     pub max_recv_frag: u16,
+    /// Maximum number of pending fragmented requests per connection
+    pub max_concurrent_fragments: usize,
 }
 
 impl Default for DceRpcServerConfig {
@@ -86,6 +88,7 @@ impl Default for DceRpcServerConfig {
             max_connections: 10000,
             max_xmit_frag: 4280,
             max_recv_frag: 4280,
+            max_concurrent_fragments: 100, // Default limit
         }
     }
 }
@@ -220,6 +223,7 @@ impl DceRpcServer {
             let max_pdu_size = self.config.max_pdu_size;
             let max_xmit_frag = self.config.max_xmit_frag;
             let max_recv_frag = self.config.max_recv_frag;
+            let max_concurrent_fragments = self.config.max_concurrent_fragments;
             let assoc_group_id = self.assoc_group_counter.fetch_add(1, Ordering::SeqCst);
             let stats = Arc::clone(&self.stats);
 
@@ -233,6 +237,7 @@ impl DceRpcServer {
                     max_pdu_size,
                     max_xmit_frag,
                     max_recv_frag,
+                    max_concurrent_fragments,
                     assoc_group_id,
                     &stats,
                 )
@@ -302,6 +307,7 @@ impl DceRpcServer {
                     let max_pdu_size = self.config.max_pdu_size;
                     let max_xmit_frag = self.config.max_xmit_frag;
                     let max_recv_frag = self.config.max_recv_frag;
+                    let max_concurrent_fragments = self.config.max_concurrent_fragments;
                     let assoc_group_id = self.assoc_group_counter.fetch_add(1, Ordering::SeqCst);
                     let stats = Arc::clone(&self.stats);
 
@@ -314,6 +320,7 @@ impl DceRpcServer {
                             max_pdu_size,
                             max_xmit_frag,
                             max_recv_frag,
+                            max_concurrent_fragments,
                             assoc_group_id,
                             &stats,
                         ).await;
@@ -363,6 +370,7 @@ async fn handle_connection(
     max_pdu_size: usize,
     max_xmit_frag: u16,
     max_recv_frag: u16,
+    max_concurrent_fragments: usize,
     assoc_group_id: u32,
     stats: &Arc<ServerStats>,
 ) -> Result<()> {
@@ -444,6 +452,7 @@ async fn handle_connection(
                     let complete_request = handle_request_fragment(
                         &mut ctx.request_assemblers,
                         &request,
+                        max_concurrent_fragments,
                     )?;
 
                     if let Some(full_request) = complete_request {
@@ -609,12 +618,21 @@ async fn process_request(
 fn handle_request_fragment(
     assemblers: &mut HashMap<u32, FragmentAssembler>,
     request: &RequestPdu,
+    max_concurrent_fragments: usize,
 ) -> Result<Option<RequestPdu>> {
     let call_id = request.header.call_id;
     let is_first = request.header.packet_flags.is_first_frag();
 
     // Get or create assembler for this call
     let assembler = if is_first {
+        // Enforce limit on concurrent fragment assemblies per connection
+        if !assemblers.contains_key(&call_id) && assemblers.len() >= max_concurrent_fragments {
+             // In a real implementation we might evict the oldest, but for TCP
+             // failing the new request is acceptable as it indicates client misbehavior
+             // or resource exhaustion
+             return Err(RpcError::ResourceLimitExceeded("Max concurrent fragments reached".into()));
+        }
+
         // First fragment - create new assembler using entry() to avoid extra lookup
         assemblers
             .entry(call_id)
@@ -773,6 +791,7 @@ mod tests {
             max_connections: 5000,
             max_xmit_frag: 8192,
             max_recv_frag: 8192,
+            max_concurrent_fragments: 100,
         };
         let server = DceRpcServer::with_config(config);
         assert_eq!(server.config.max_connections, 5000);

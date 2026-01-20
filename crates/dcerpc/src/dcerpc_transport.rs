@@ -173,7 +173,7 @@ mod tests {
                 assert_eq!(req.opnum, 0);
                 assert_eq!(req.stub_data.as_ref(), b"hello");
             }
-            _ => panic!("expected request PDU"),
+            other => panic!("expected request PDU, got {:?}", other),
         }
 
         write_handle.await.unwrap();
@@ -201,7 +201,7 @@ mod tests {
                     assert_eq!(req.header.call_id, i);
                     assert_eq!(req.opnum, i as u16);
                 }
-                _ => panic!("expected request PDU"),
+                other => panic!("expected request PDU, got {:?}", other),
             }
         }
 

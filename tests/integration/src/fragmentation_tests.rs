@@ -66,6 +66,7 @@ async fn start_frag_test_server(
         max_connections: 100,
         max_xmit_frag: max_frag,
         max_recv_frag: max_frag,
+        max_concurrent_fragments: 100,
     };
 
     let server = Arc::new(DceRpcServer::with_config(config));
