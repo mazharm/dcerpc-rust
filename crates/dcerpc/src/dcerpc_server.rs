@@ -798,6 +798,8 @@ mod tests {
             max_xmit_frag: 8192,
             max_recv_frag: 8192,
             max_concurrent_fragments: 100,
+            connection_timeout_secs: Some(300),
+            idle_timeout_secs: Some(600),
         };
         let server = DceRpcServer::with_config(config);
         assert_eq!(server.config.max_connections, 5000);
