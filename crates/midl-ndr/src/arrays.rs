@@ -530,14 +530,12 @@ mod tests {
 
     #[test]
     fn test_varying_array_integer_overflow_protection() {
-        // Test that integer overflow in offset + actual_count is detected
-        // On 64-bit systems, usize can hold larger values than u32, but we still
-        // want to detect when offset + actual_count would be unreasonably large
+        // Test that integer overflow in offset + actual_count is detected.
+        // This validates proper bounds checking: offset + actual_count must be <= N
         let ctx = NdrContext::new();
         let mut buf = BytesMut::new();
 
         // Write values where offset + actual_count exceeds the array size N
-        // This tests that the comparison works correctly even with wraparound values
         ctx.put_u32(&mut buf, 90); // offset
         ctx.put_u32(&mut buf, 20); // actual_count (offset + actual_count = 110 > 100)
 

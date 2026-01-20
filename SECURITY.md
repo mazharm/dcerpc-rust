@@ -164,7 +164,7 @@ If you discover a security vulnerability, please report it to the maintainers pr
 
 | Date | Version | Auditor | Findings |
 |------|---------|---------|----------|
-| 2026-01-20 | 0.1.0 | GitHub Copilot | Integer overflow in VaryingArray (FIXED), Missing timeout configs (FIXED) |
+| 2025-01-20 | 0.1.0 | GitHub Copilot | Integer overflow in VaryingArray (FIXED), Missing timeout configs (FIXED) |
 
 ## Testing
 
@@ -193,7 +193,7 @@ cargo test --package integration-tests
 
 ## Changelog
 
-### Version 0.1.0 (2026-01-20)
+### Version 0.1.0 (2025-01-20)
 - **FIXED**: Integer overflow vulnerability in `VaryingArray::ndr_decode()`
 - **ADDED**: `connection_timeout_secs` and `idle_timeout_secs` to `DceRpcServerConfig`
 - **ADDED**: Security test cases for integer overflow protection
