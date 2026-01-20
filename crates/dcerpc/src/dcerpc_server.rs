@@ -79,6 +79,10 @@ pub struct DceRpcServerConfig {
     pub max_recv_frag: u16,
     /// Maximum number of pending fragmented requests per connection
     pub max_concurrent_fragments: usize,
+    /// Connection timeout in seconds (None = no timeout)
+    pub connection_timeout_secs: Option<u64>,
+    /// Idle timeout in seconds (None = no timeout)
+    pub idle_timeout_secs: Option<u64>,
 }
 
 impl Default for DceRpcServerConfig {
@@ -89,6 +93,8 @@ impl Default for DceRpcServerConfig {
             max_xmit_frag: 4280,
             max_recv_frag: 4280,
             max_concurrent_fragments: 100, // Default limit
+            connection_timeout_secs: Some(300), // 5 minutes default
+            idle_timeout_secs: Some(600), // 10 minutes default
         }
     }
 }
