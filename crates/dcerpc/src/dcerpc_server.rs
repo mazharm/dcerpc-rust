@@ -79,6 +79,9 @@ pub struct DceRpcServerConfig {
     pub max_recv_frag: u16,
     /// Maximum number of pending fragmented requests per connection
     pub max_concurrent_fragments: usize,
+    /// Maximum total memory allocated per connection for all fragments (in bytes)
+    /// Prevents memory exhaustion from a single malicious connection
+    pub max_connection_memory_budget: usize,
 }
 
 impl Default for DceRpcServerConfig {
@@ -89,6 +92,7 @@ impl Default for DceRpcServerConfig {
             max_xmit_frag: 4280,
             max_recv_frag: 4280,
             max_concurrent_fragments: 100, // Default limit
+            max_connection_memory_budget: 16 * 1024 * 1024, // 16 MB per connection
         }
     }
 }
@@ -792,6 +796,7 @@ mod tests {
             max_xmit_frag: 8192,
             max_recv_frag: 8192,
             max_concurrent_fragments: 100,
+            max_connection_memory_budget: 16 * 1024 * 1024,
         };
         let server = DceRpcServer::with_config(config);
         assert_eq!(server.config.max_connections, 5000);

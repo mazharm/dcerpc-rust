@@ -184,7 +184,13 @@ impl AuthVerifier {
 
     /// Decode an auth verifier from the end of a PDU
     pub fn decode(data: &[u8], auth_length: usize, little_endian: bool) -> Option<Self> {
+        // Validate we have at least the header
         if data.len() < Self::HEADER_SIZE {
+            return None;
+        }
+        
+        // Validate auth_length doesn't exceed data length
+        if auth_length > data.len() {
             return None;
         }
 
@@ -198,8 +204,11 @@ impl AuthVerifier {
             u32::from_be_bytes([data[4], data[5], data[6], data[7]])
         };
 
+        // Calculate auth value length with overflow protection
         let auth_value_len = auth_length.saturating_sub(Self::HEADER_SIZE);
-        if data.len() < Self::HEADER_SIZE + auth_value_len {
+        
+        // Verify we have enough data for the auth value
+        if Self::HEADER_SIZE.saturating_add(auth_value_len) > data.len() {
             return None;
         }
 
