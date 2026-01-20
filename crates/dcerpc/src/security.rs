@@ -207,8 +207,9 @@ impl AuthVerifier {
         // Calculate auth value length with overflow protection
         let auth_value_len = auth_length.saturating_sub(Self::HEADER_SIZE);
         
-        // Verify we have enough data for the auth value
-        if Self::HEADER_SIZE.saturating_add(auth_value_len) > data.len() {
+        // Since auth_length <= data.len(), and auth_value_len = auth_length - HEADER_SIZE,
+        // we only need to verify HEADER_SIZE + auth_value_len doesn't exceed data.len()
+        if data.len() < Self::HEADER_SIZE + auth_value_len {
             return None;
         }
 

@@ -80,7 +80,12 @@ pub struct DceRpcServerConfig {
     /// Maximum number of pending fragmented requests per connection
     pub max_concurrent_fragments: usize,
     /// Maximum total memory allocated per connection for all fragments (in bytes)
-    /// Prevents memory exhaustion from a single malicious connection
+    /// 
+    /// Prevents memory exhaustion from a single malicious connection that sends
+    /// multiple large arrays. This is enforced at the connection level and is
+    /// complementary to the per-array MAX_NDR_ARRAY_ELEMENTS limit.
+    /// 
+    /// Default: 16 MB per connection
     pub max_connection_memory_budget: usize,
 }
 
