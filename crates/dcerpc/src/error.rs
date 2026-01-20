@@ -76,6 +76,9 @@ pub enum RpcError {
 
     #[error("fragment timeout: received {received} fragments, waiting for more")]
     FragmentTimeout { received: usize },
+
+    #[error("resource limit exceeded: {0}")]
+    ResourceLimitExceeded(String),
 }
 
 impl From<midl_ndr::NdrError> for RpcError {
