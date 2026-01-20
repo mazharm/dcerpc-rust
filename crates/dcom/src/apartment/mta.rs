@@ -3,8 +3,9 @@
 //! In an MTA, calls are dispatched concurrently. Objects must be thread-safe.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use parking_lot::RwLock;
 use bytes::Bytes;
 use crate::types::{Oid, DcomError};
 use super::apartment::{Apartment, ApartmentId, ApartmentType, CallFuture, ComObject};
@@ -59,13 +60,13 @@ impl Apartment for MultithreadedApartment {
 
     fn register_object(&self, object: Arc<dyn ComObject>) -> Oid {
         let oid = object.oid();
-        let mut objects = self.objects.write().unwrap();
+        let mut objects = self.objects.write();
         objects.insert(oid, object);
         oid
     }
 
     fn get_object(&self, oid: &Oid) -> Option<Arc<dyn ComObject>> {
-        let objects = self.objects.read().unwrap();
+        let objects = self.objects.read();
         objects.get(oid).cloned()
     }
 
@@ -83,7 +84,7 @@ impl Apartment for MultithreadedApartment {
         }
 
         let object = {
-            let objects = self.objects.read().unwrap();
+            let objects = self.objects.read();
             objects.get(&oid).cloned()
         };
 
@@ -102,7 +103,7 @@ impl Apartment for MultithreadedApartment {
 
     fn shutdown(&self) {
         self.running.store(false, Ordering::SeqCst);
-        let mut objects = self.objects.write().unwrap();
+        let mut objects = self.objects.write();
         objects.clear();
     }
 

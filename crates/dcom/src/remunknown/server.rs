@@ -74,7 +74,12 @@ impl RemUnknownServer {
                     if let Some(entry) = exporter.lookup_ipid(&new_ipid) {
                         // Add the requested number of public references
                         if request.refs > 0 {
-                            let _ = exporter.add_refs(&new_ipid, request.refs, None);
+                            if let Err(e) = exporter.add_refs(&new_ipid, request.refs, None) {
+                                tracing::warn!(
+                                    "Failed to add {} refs to IPID {:?}: {:?}",
+                                    request.refs, new_ipid, e
+                                );
+                            }
                         }
 
                         let std = StdObjRef::new(
@@ -130,7 +135,12 @@ impl RemUnknownServer {
             .map_err(|e| dcerpc::RpcError::InvalidPduData(e.to_string()))?;
 
         for r in &request.refs {
-            let _ = exporter.release_refs(&r.ipid, r.public_refs, None);
+            if let Err(e) = exporter.release_refs(&r.ipid, r.public_refs, None) {
+                tracing::warn!(
+                    "Failed to release {} refs from IPID {:?}: {:?}",
+                    r.public_refs, r.ipid, e
+                );
+            }
         }
 
         let response = RemReleaseResponse::success();

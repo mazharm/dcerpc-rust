@@ -148,6 +148,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "midl-ndr",
+ "parking_lot",
  "thiserror",
  "tokio",
  "tracing",
