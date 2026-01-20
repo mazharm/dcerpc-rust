@@ -1,7 +1,8 @@
 //! Call dispatcher for routing calls to the correct apartment
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use bytes::Bytes;
 use crate::types::{Ipid, Oid};
 use super::apartment::{Apartment, ApartmentId, CallFuture};
@@ -43,47 +44,53 @@ impl CallDispatcher {
 
     /// Register an apartment
     pub fn register_apartment(&self, apartment: Arc<dyn Apartment>) {
-        let mut apartments = self.apartments.write().unwrap();
+        let mut apartments = self.apartments.write();
         apartments.insert(apartment.id(), apartment);
     }
 
     /// Unregister an apartment
     pub fn unregister_apartment(&self, id: ApartmentId) {
-        let mut apartments = self.apartments.write().unwrap();
+        let mut apartments = self.apartments.write();
         apartments.remove(&id);
     }
 
     /// Associate an IPID with an apartment
     pub fn associate_ipid(&self, ipid: Ipid, apartment_id: ApartmentId) {
-        let mut map = self.ipid_to_apartment.write().unwrap();
+        let mut map = self.ipid_to_apartment.write();
         map.insert(ipid, apartment_id);
     }
 
     /// Associate an OID with an apartment
     pub fn associate_oid(&self, oid: Oid, apartment_id: ApartmentId) {
-        let mut map = self.oid_to_apartment.write().unwrap();
+        let mut map = self.oid_to_apartment.write();
         map.insert(oid, apartment_id);
     }
 
     /// Get the apartment for an IPID
+    ///
+    /// Uses atomic lookup to avoid TOCTOU race conditions.
     pub fn get_apartment_for_ipid(&self, ipid: &Ipid) -> Option<Arc<dyn Apartment>> {
-        let map = self.ipid_to_apartment.read().unwrap();
-        if let Some(&apt_id) = map.get(ipid) {
-            let apartments = self.apartments.read().unwrap();
-            apartments.get(&apt_id).cloned()
-        } else {
-            None
-        }
+        // Hold both locks together to prevent race condition where apartment
+        // is removed between looking up the ID and fetching the apartment
+        let map = self.ipid_to_apartment.read();
+        let apartments = self.apartments.read();
+        
+        map.get(ipid)
+            .and_then(|apt_id| apartments.get(apt_id).cloned())
     }
 
     /// Get the apartment for an OID
+    ///
+    /// Uses atomic lookup to avoid TOCTOU race conditions.
+    /// Returns default MTA if OID is not explicitly associated with an apartment.
     pub fn get_apartment_for_oid(&self, oid: &Oid) -> Option<Arc<dyn Apartment>> {
-        let map = self.oid_to_apartment.read().unwrap();
-        if let Some(&apt_id) = map.get(oid) {
-            let apartments = self.apartments.read().unwrap();
-            apartments.get(&apt_id).cloned()
-        } else {
-            Some(self.default_mta.clone())
+        // Hold both locks together to prevent race condition
+        let map = self.oid_to_apartment.read();
+        let apartments = self.apartments.read();
+        
+        match map.get(oid) {
+            Some(apt_id) => apartments.get(apt_id).cloned().or_else(|| Some(self.default_mta.clone())),
+            None => Some(self.default_mta.clone()),
         }
     }
 
@@ -126,19 +133,19 @@ impl CallDispatcher {
 
     /// Remove IPID association
     pub fn remove_ipid(&self, ipid: &Ipid) {
-        let mut map = self.ipid_to_apartment.write().unwrap();
+        let mut map = self.ipid_to_apartment.write();
         map.remove(ipid);
     }
 
     /// Remove OID association
     pub fn remove_oid(&self, oid: &Oid) {
-        let mut map = self.oid_to_apartment.write().unwrap();
+        let mut map = self.oid_to_apartment.write();
         map.remove(oid);
     }
 
     /// Shutdown all apartments
     pub fn shutdown(&self) {
-        let apartments = self.apartments.read().unwrap();
+        let apartments = self.apartments.read();
         for (_, apt) in apartments.iter() {
             apt.shutdown();
         }

@@ -105,15 +105,16 @@ pub struct ServerStats {
 
 impl ServerStats {
     pub fn snapshot(&self) -> ServerStatsSnapshot {
+        // Use Acquire ordering for consistent reads across all stats
         ServerStatsSnapshot {
-            connections_accepted: self.connections_accepted.load(Ordering::Relaxed),
-            connections_active: self.connections_active.load(Ordering::Relaxed),
-            connections_rejected: self.connections_rejected.load(Ordering::Relaxed),
-            requests_received: self.requests_received.load(Ordering::Relaxed),
-            requests_processed: self.requests_processed.load(Ordering::Relaxed),
-            requests_failed: self.requests_failed.load(Ordering::Relaxed),
-            bytes_received: self.bytes_received.load(Ordering::Relaxed),
-            bytes_sent: self.bytes_sent.load(Ordering::Relaxed),
+            connections_accepted: self.connections_accepted.load(Ordering::Acquire),
+            connections_active: self.connections_active.load(Ordering::Acquire),
+            connections_rejected: self.connections_rejected.load(Ordering::Acquire),
+            requests_received: self.requests_received.load(Ordering::Acquire),
+            requests_processed: self.requests_processed.load(Ordering::Acquire),
+            requests_failed: self.requests_failed.load(Ordering::Acquire),
+            bytes_received: self.bytes_received.load(Ordering::Acquire),
+            bytes_sent: self.bytes_sent.load(Ordering::Acquire),
         }
     }
 }
@@ -204,15 +205,15 @@ impl DceRpcServer {
                 Ok(permit) => permit,
                 Err(_) => {
                     // At connection limit, reject
-                    self.stats.connections_rejected.fetch_add(1, Ordering::Relaxed);
+                    self.stats.connections_rejected.fetch_add(1, Ordering::Release);
                     warn!("Connection limit reached, rejecting connection from {}", peer_addr);
                     drop(stream);
                     continue;
                 }
             };
 
-            self.stats.connections_accepted.fetch_add(1, Ordering::Relaxed);
-            self.stats.connections_active.fetch_add(1, Ordering::Relaxed);
+            self.stats.connections_accepted.fetch_add(1, Ordering::Release);
+            self.stats.connections_active.fetch_add(1, Ordering::Release);
             debug!("Accepted connection from {}", peer_addr);
 
             let interfaces = Arc::clone(&self.interfaces);
@@ -237,7 +238,7 @@ impl DceRpcServer {
                 )
                 .await;
 
-                stats.connections_active.fetch_sub(1, Ordering::Relaxed);
+                stats.connections_active.fetch_sub(1, Ordering::Release);
 
                 match result {
                     Ok(()) => debug!("Connection closed normally from {}", peer_addr),
@@ -286,15 +287,15 @@ impl DceRpcServer {
                     let permit = match semaphore.clone().try_acquire_owned() {
                         Ok(permit) => permit,
                         Err(_) => {
-                            self.stats.connections_rejected.fetch_add(1, Ordering::Relaxed);
+                            self.stats.connections_rejected.fetch_add(1, Ordering::Release);
                             warn!("Connection limit reached, rejecting connection from {}", peer_addr);
                             drop(stream);
                             continue;
                         }
                     };
 
-                    self.stats.connections_accepted.fetch_add(1, Ordering::Relaxed);
-                    self.stats.connections_active.fetch_add(1, Ordering::Relaxed);
+                    self.stats.connections_accepted.fetch_add(1, Ordering::Release);
+                    self.stats.connections_active.fetch_add(1, Ordering::Release);
                     debug!("Accepted connection from {}", peer_addr);
 
                     let interfaces = Arc::clone(&self.interfaces);
@@ -317,7 +318,7 @@ impl DceRpcServer {
                             &stats,
                         ).await;
 
-                        stats.connections_active.fetch_sub(1, Ordering::Relaxed);
+                        stats.connections_active.fetch_sub(1, Ordering::Release);
 
                         match result {
                             Ok(()) => debug!("Connection closed normally from {}", peer_addr),
@@ -385,7 +386,7 @@ async fn handle_connection(
     loop {
         // Read a PDU
         let pdu = read_transport.read_pdu_decoded().await?;
-        stats.requests_received.fetch_add(1, Ordering::Relaxed);
+        stats.requests_received.fetch_add(1, Ordering::Release);
 
         match pdu {
             Pdu::Bind(bind) => {
@@ -408,9 +409,9 @@ async fn handle_connection(
                 .await;
 
                 let encoded = response.encode();
-                stats.bytes_sent.fetch_add(encoded.len() as u64, Ordering::Relaxed);
+                stats.bytes_sent.fetch_add(encoded.len() as u64, Ordering::Release);
                 write_transport.write_pdu(&encoded).await?;
-                stats.requests_processed.fetch_add(1, Ordering::Relaxed);
+                stats.requests_processed.fetch_add(1, Ordering::Release);
             }
 
             Pdu::Request(request) => {
@@ -553,14 +554,14 @@ async fn process_request(
     let bound = match &ctx.bound_context {
         Some(b) => b,
         None => {
-            stats.requests_failed.fetch_add(1, Ordering::Relaxed);
+            stats.requests_failed.fetch_add(1, Ordering::Release);
             return Pdu::Fault(FaultPdu::new(call_id, FaultStatus::ContextMismatch));
         }
     };
 
     // Verify context ID matches
     if request.context_id != bound.context_id {
-        stats.requests_failed.fetch_add(1, Ordering::Relaxed);
+        stats.requests_failed.fetch_add(1, Ordering::Release);
         return Pdu::Fault(FaultPdu::new(call_id, FaultStatus::ContextMismatch));
     }
 
@@ -569,7 +570,7 @@ async fn process_request(
     let interface = match interfaces.get(&bound.interface_uuid) {
         Some(iface) => iface,
         None => {
-            stats.requests_failed.fetch_add(1, Ordering::Relaxed);
+            stats.requests_failed.fetch_add(1, Ordering::Release);
             return Pdu::Fault(FaultPdu::new(call_id, FaultStatus::UnkIf));
         }
     };
@@ -577,7 +578,7 @@ async fn process_request(
     let handler = match interface.get_operation(request.opnum) {
         Some(h) => Arc::clone(h),
         None => {
-            stats.requests_failed.fetch_add(1, Ordering::Relaxed);
+            stats.requests_failed.fetch_add(1, Ordering::Release);
             return Pdu::Fault(FaultPdu::new(call_id, FaultStatus::OpRngError));
         }
     };
@@ -588,14 +589,14 @@ async fn process_request(
     // Call the handler
     match handler(request.stub_data.clone()).await {
         Ok(result) => {
-            stats.requests_processed.fetch_add(1, Ordering::Relaxed);
+            stats.requests_processed.fetch_add(1, Ordering::Release);
             let mut response = ResponsePdu::new(call_id, result);
             response.context_id = request.context_id;
             Pdu::Response(response)
         }
         Err(e) => {
             error!("Operation error: {}", e);
-            stats.requests_failed.fetch_add(1, Ordering::Relaxed);
+            stats.requests_failed.fetch_add(1, Ordering::Release);
             Pdu::Fault(FaultPdu::new(call_id, FaultStatus::RpcError))
         }
     }
@@ -673,7 +674,7 @@ async fn send_response_fragmented<W: tokio::io::AsyncWrite + Unpin>(
             if resp.stub_data.len() <= max_stub {
                 // Single fragment
                 let encoded = resp.encode();
-                stats.bytes_sent.fetch_add(encoded.len() as u64, Ordering::Relaxed);
+                stats.bytes_sent.fetch_add(encoded.len() as u64, Ordering::Release);
                 write_transport.write_pdu(&encoded).await
             } else {
                 // Multiple fragments
@@ -687,7 +688,7 @@ async fn send_response_fragmented<W: tokio::io::AsyncWrite + Unpin>(
 
                 for frag in fragments {
                     let encoded = frag.encode();
-                    stats.bytes_sent.fetch_add(encoded.len() as u64, Ordering::Relaxed);
+                    stats.bytes_sent.fetch_add(encoded.len() as u64, Ordering::Release);
                     write_transport.write_pdu(&encoded).await?;
                 }
                 Ok(())
@@ -696,7 +697,7 @@ async fn send_response_fragmented<W: tokio::io::AsyncWrite + Unpin>(
         // Non-response PDUs (faults) are never fragmented
         other => {
             let encoded = other.encode();
-            stats.bytes_sent.fetch_add(encoded.len() as u64, Ordering::Relaxed);
+            stats.bytes_sent.fetch_add(encoded.len() as u64, Ordering::Release);
             write_transport.write_pdu(&encoded).await
         }
     }
@@ -755,9 +756,9 @@ mod tests {
     #[test]
     fn test_server_stats() {
         let stats = ServerStats::default();
-        stats.connections_accepted.fetch_add(100, Ordering::Relaxed);
-        stats.connections_active.fetch_add(50, Ordering::Relaxed);
-        stats.requests_processed.fetch_add(1000, Ordering::Relaxed);
+        stats.connections_accepted.fetch_add(100, Ordering::Release);
+        stats.connections_active.fetch_add(50, Ordering::Release);
+        stats.requests_processed.fetch_add(1000, Ordering::Release);
 
         let snapshot = stats.snapshot();
         assert_eq!(snapshot.connections_accepted, 100);

@@ -4,8 +4,9 @@
 //! Objects don't need to be thread-safe.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use parking_lot::{Mutex, RwLock};
 use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot};
 use crate::types::{Oid, DcomError};
@@ -70,7 +71,7 @@ impl SinglethreadedApartment {
     /// Start the message processing loop
     fn start_message_loop(&self) {
         let (tx, mut rx) = mpsc::channel::<StaMessage>(1024);
-        *self.sender.lock().unwrap() = Some(tx);
+        *self.sender.lock() = Some(tx);
 
         let objects = self.objects.clone();
         let running = self.running.clone(); // Clone the Arc, not the value
@@ -86,7 +87,7 @@ impl SinglethreadedApartment {
                 }
 
                 let result = {
-                    let objects_guard = objects.read().unwrap();
+                    let objects_guard = objects.read();
                     if let Some(obj) = objects_guard.get(&msg.oid) {
                         // Execute the call synchronously in this task
                         Some(obj.invoke(&msg.iid, msg.opnum, msg.args))
@@ -123,13 +124,13 @@ impl Apartment for SinglethreadedApartment {
 
     fn register_object(&self, object: Arc<dyn ComObject>) -> Oid {
         let oid = object.oid();
-        let mut objects = self.objects.write().unwrap();
+        let mut objects = self.objects.write();
         objects.insert(oid, object);
         oid
     }
 
     fn get_object(&self, oid: &Oid) -> Option<Arc<dyn ComObject>> {
-        let objects = self.objects.read().unwrap();
+        let objects = self.objects.read();
         objects.get(oid).cloned()
     }
 
@@ -140,14 +141,15 @@ impl Apartment for SinglethreadedApartment {
         opnum: u16,
         args: Bytes,
     ) -> CallFuture {
-        if !self.running.load(Ordering::SeqCst) {
-            return Box::pin(async move {
-                Err(DcomError::ApartmentError("apartment is shutdown".to_string()))
-            });
-        }
-
+        // Atomically check running state and get sender while holding lock
+        // to prevent race condition where shutdown() clears sender between check and use
         let sender = {
-            let guard = self.sender.lock().unwrap();
+            let guard = self.sender.lock();
+            if !self.running.load(Ordering::SeqCst) {
+                return Box::pin(async move {
+                    Err(DcomError::ApartmentError("apartment is shutdown".to_string()))
+                });
+            }
             guard.clone()
         };
 
@@ -182,8 +184,8 @@ impl Apartment for SinglethreadedApartment {
 
     fn shutdown(&self) {
         self.running.store(false, Ordering::SeqCst);
-        *self.sender.lock().unwrap() = None;
-        let mut objects = self.objects.write().unwrap();
+        *self.sender.lock() = None;
+        let mut objects = self.objects.write();
         objects.clear();
     }
 

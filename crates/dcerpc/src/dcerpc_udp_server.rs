@@ -10,6 +10,7 @@
 //! - Semaphore-based concurrency limiting
 //! - Lock-free request dispatching where possible
 //! - Graceful shutdown support
+//! - TTL-based fragment cache cleanup to prevent memory exhaustion
 //!
 //! # Key differences from connection-oriented (TCP) server:
 //! - No bind/bind_ack handshake - requests handled directly
@@ -27,7 +28,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 use tokio::sync::{RwLock, Semaphore};
 use tracing::{debug, error, info, trace, warn};
@@ -41,6 +42,10 @@ pub struct UdpDceRpcServerConfig {
     pub max_concurrent_requests: usize,
     /// Number of receiver tasks for parallel packet reception
     pub receiver_tasks: usize,
+    /// Maximum number of pending fragment assemblies (prevents memory exhaustion)
+    pub max_fragment_assemblies: usize,
+    /// Fragment assembly timeout (seconds) - assemblies older than this are cleaned up
+    pub fragment_ttl_secs: u64,
 }
 
 impl Default for UdpDceRpcServerConfig {
@@ -49,6 +54,8 @@ impl Default for UdpDceRpcServerConfig {
             max_message_size: 4096,
             max_concurrent_requests: 10000,
             receiver_tasks: num_cpus(),
+            max_fragment_assemblies: 10000,
+            fragment_ttl_secs: 60,
         }
     }
 }
@@ -69,17 +76,24 @@ pub struct UdpServerStats {
     pub requests_failed: AtomicU64,
     pub bytes_received: AtomicU64,
     pub bytes_sent: AtomicU64,
+    /// Number of fragment assemblies evicted due to cache limit
+    pub fragments_evicted_limit: AtomicU64,
+    /// Number of fragment assemblies evicted due to TTL expiry
+    pub fragments_evicted_ttl: AtomicU64,
 }
 
 impl UdpServerStats {
     pub fn snapshot(&self) -> UdpServerStatsSnapshot {
+        // Use Acquire ordering for consistent reads across all stats
         UdpServerStatsSnapshot {
-            requests_received: self.requests_received.load(Ordering::Relaxed),
-            requests_processed: self.requests_processed.load(Ordering::Relaxed),
-            requests_rejected: self.requests_rejected.load(Ordering::Relaxed),
-            requests_failed: self.requests_failed.load(Ordering::Relaxed),
-            bytes_received: self.bytes_received.load(Ordering::Relaxed),
-            bytes_sent: self.bytes_sent.load(Ordering::Relaxed),
+            requests_received: self.requests_received.load(Ordering::Acquire),
+            requests_processed: self.requests_processed.load(Ordering::Acquire),
+            requests_rejected: self.requests_rejected.load(Ordering::Acquire),
+            requests_failed: self.requests_failed.load(Ordering::Acquire),
+            bytes_received: self.bytes_received.load(Ordering::Acquire),
+            bytes_sent: self.bytes_sent.load(Ordering::Acquire),
+            fragments_evicted_limit: self.fragments_evicted_limit.load(Ordering::Acquire),
+            fragments_evicted_ttl: self.fragments_evicted_ttl.load(Ordering::Acquire),
         }
     }
 }
@@ -93,6 +107,8 @@ pub struct UdpServerStatsSnapshot {
     pub requests_failed: u64,
     pub bytes_received: u64,
     pub bytes_sent: u64,
+    pub fragments_evicted_limit: u64,
+    pub fragments_evicted_ttl: u64,
 }
 
 /// Key for identifying a fragmented request assembly
@@ -115,6 +131,8 @@ struct FragmentAssembly {
     header_template: ClPduHeader,
     received_last: bool,
     last_fragnum: u16,
+    /// Timestamp when this assembly was created (for TTL cleanup)
+    created_at: Instant,
 }
 
 impl FragmentAssembly {
@@ -127,6 +145,7 @@ impl FragmentAssembly {
             header_template: header.clone(),
             received_last: false,
             last_fragnum: 0,
+            created_at: Instant::now(),
         }
     }
 
@@ -260,8 +279,15 @@ impl UdpDceRpcServer {
         // Create semaphore for concurrency limiting
         let semaphore = Arc::new(Semaphore::new(self.config.max_concurrent_requests));
 
-        // Run the receive loop
-        self.receive_loop(socket, semaphore).await
+        // Spawn fragment cache cleanup task
+        let cleanup_handle = self.spawn_fragment_cleanup_task();
+
+        let result = self.receive_loop(socket, semaphore).await;
+
+        // Abort cleanup task when server stops
+        cleanup_handle.abort();
+
+        result
     }
 
     /// Run the server with graceful shutdown
@@ -278,6 +304,9 @@ impl UdpDceRpcServer {
 
         let semaphore = Arc::new(Semaphore::new(self.config.max_concurrent_requests));
 
+        // Spawn fragment cache cleanup task
+        let cleanup_handle = self.spawn_fragment_cleanup_task();
+
         tokio::pin!(shutdown);
 
         loop {
@@ -288,6 +317,7 @@ impl UdpDceRpcServer {
 
                 _ = &mut shutdown => {
                     info!("UDP server shutting down gracefully");
+                    cleanup_handle.abort();
                     // Wait for pending requests to complete
                     let _ = semaphore.acquire_many(self.config.max_concurrent_requests as u32).await;
                     info!("All pending requests completed");
@@ -297,8 +327,8 @@ impl UdpDceRpcServer {
                 result = socket.recv_from(&mut buf) => {
                     match result {
                         Ok((len, peer_addr)) => {
-                            self.stats.requests_received.fetch_add(1, Ordering::Relaxed);
-                            self.stats.bytes_received.fetch_add(len as u64, Ordering::Relaxed);
+                            self.stats.requests_received.fetch_add(1, Ordering::Release);
+                            self.stats.bytes_received.fetch_add(len as u64, Ordering::Release);
 
                             let data = Bytes::copy_from_slice(&buf[..len]);
                             self.spawn_handler(
@@ -317,6 +347,34 @@ impl UdpDceRpcServer {
         }
     }
 
+    /// Spawn background task to cleanup expired fragment assemblies
+    fn spawn_fragment_cleanup_task(&self) -> tokio::task::JoinHandle<()> {
+        let fragment_cache = Arc::clone(&self.fragment_cache);
+        let stats = Arc::clone(&self.stats);
+        let ttl = Duration::from_secs(self.config.fragment_ttl_secs);
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+
+                let mut cache = fragment_cache.write().await;
+                let now = Instant::now();
+                let before_len = cache.len();
+
+                cache.retain(|_key, assembly| {
+                    now.duration_since(assembly.created_at) < ttl
+                });
+
+                let evicted = before_len - cache.len();
+                if evicted > 0 {
+                    stats.fragments_evicted_ttl.fetch_add(evicted as u64, Ordering::Release);
+                    debug!("Cleaned up {} expired fragment assemblies", evicted);
+                }
+            }
+        })
+    }
+
     /// Main receive loop
     async fn receive_loop(
         &self,
@@ -328,8 +386,8 @@ impl UdpDceRpcServer {
         loop {
             match socket.recv_from(&mut buf).await {
                 Ok((len, peer_addr)) => {
-                    self.stats.requests_received.fetch_add(1, Ordering::Relaxed);
-                    self.stats.bytes_received.fetch_add(len as u64, Ordering::Relaxed);
+                    self.stats.requests_received.fetch_add(1, Ordering::Release);
+                    self.stats.bytes_received.fetch_add(len as u64, Ordering::Release);
 
                     let data = Bytes::copy_from_slice(&buf[..len]);
                     self.spawn_handler(
@@ -359,6 +417,7 @@ impl UdpDceRpcServer {
         let stats = Arc::clone(&self.stats);
         let fragment_cache = Arc::clone(&self.fragment_cache);
         let max_message_size = self.config.max_message_size;
+        let max_fragment_assemblies = self.config.max_fragment_assemblies;
 
         tokio::spawn(async move {
             // Acquire semaphore permit (limits concurrency)
@@ -379,6 +438,7 @@ impl UdpDceRpcServer {
                 &stats,
                 &fragment_cache,
                 max_message_size,
+                max_fragment_assemblies,
             ).await;
 
             for response in responses {
@@ -386,7 +446,7 @@ impl UdpDceRpcServer {
                 if let Err(e) = socket.send_to(&response, peer_addr).await {
                     error!("Failed to send response to {}: {}", peer_addr, e);
                 } else {
-                    stats.bytes_sent.fetch_add(response_len as u64, Ordering::Relaxed);
+                    stats.bytes_sent.fetch_add(response_len as u64, Ordering::Release);
                 }
             }
         });
@@ -411,13 +471,14 @@ async fn process_packet(
     stats: &Arc<UdpServerStats>,
     fragment_cache: &Arc<RwLock<HashMap<FragmentKey, FragmentAssembly>>>,
     max_message_size: usize,
+    max_fragment_assemblies: usize,
 ) -> Vec<Bytes> {
     // Decode the PDU
     let pdu = match ClPdu::decode(data) {
         Ok(pdu) => pdu,
         Err(e) => {
             error!("Failed to decode CL PDU from {}: {}", peer_addr, e);
-            stats.requests_failed.fetch_add(1, Ordering::Relaxed);
+            stats.requests_failed.fetch_add(1, Ordering::Release);
             return vec![];
         }
     };
@@ -456,6 +517,23 @@ async fn process_packet(
 
             let complete_body = {
                 let mut cache = fragment_cache.write().await;
+
+                // Check if we're at the cache limit and this is a new assembly
+                if !cache.contains_key(&key) && cache.len() >= max_fragment_assemblies {
+                    // Evict oldest entry to make room
+                    if let Some(oldest_key) = cache
+                        .iter()
+                        .min_by_key(|(_, v)| v.created_at)
+                        .map(|(k, _)| k.clone())
+                    {
+                        cache.remove(&oldest_key);
+                        stats.fragments_evicted_limit.fetch_add(1, Ordering::Release);
+                        warn!(
+                            "Fragment cache limit reached ({}), evicted oldest assembly",
+                            max_fragment_assemblies
+                        );
+                    }
+                }
 
                 // Get or create assembly
                 let assembly = cache.entry(key.clone()).or_insert_with(|| {
@@ -615,7 +693,7 @@ async fn process_request(
                 "Unknown interface {} from {}",
                 request.header.if_id, peer_addr
             );
-            stats.requests_rejected.fetch_add(1, Ordering::Relaxed);
+            stats.requests_rejected.fetch_add(1, Ordering::Release);
             let reject = ClRejectPdu::new(&request.header, 0x1c010003); // nca_s_unk_if
             return ClPdu::Reject(reject);
         }
@@ -633,7 +711,7 @@ async fn process_request(
             "Interface version mismatch: expected v{}.{} (0x{:08x}), got v{}.{} (0x{:08x})",
             syntax_major, syntax_minor, interface.syntax.version, req_major, req_minor, request.header.if_vers
         );
-        stats.requests_rejected.fetch_add(1, Ordering::Relaxed);
+        stats.requests_rejected.fetch_add(1, Ordering::Release);
         let reject = ClRejectPdu::new(&request.header, 0x1c000008); // nca_s_wrong_boot_time (reusing for version)
         return ClPdu::Reject(reject);
     }
@@ -646,7 +724,7 @@ async fn process_request(
                 "Unknown operation {} on interface {}",
                 request.header.opnum, request.header.if_id
             );
-            stats.requests_rejected.fetch_add(1, Ordering::Relaxed);
+            stats.requests_rejected.fetch_add(1, Ordering::Release);
             let fault = ClFaultPdu::new(&request.header, 0x1c010002); // nca_s_op_rng_error
             return ClPdu::Fault(fault);
         }
@@ -658,14 +736,14 @@ async fn process_request(
     // Call the handler
     match handler(request.body.clone()).await {
         Ok(result) => {
-            stats.requests_processed.fetch_add(1, Ordering::Relaxed);
+            stats.requests_processed.fetch_add(1, Ordering::Release);
             let mut response = ClResponsePdu::new(&request.header, result);
             response.header.server_boot = server_boot;
             ClPdu::Response(response)
         }
         Err(e) => {
             error!("Handler error for opnum {}: {}", request.header.opnum, e);
-            stats.requests_failed.fetch_add(1, Ordering::Relaxed);
+            stats.requests_failed.fetch_add(1, Ordering::Release);
             let fault = ClFaultPdu::new(&request.header, 0x1c000000); // Generic fault
             ClPdu::Fault(fault)
         }
@@ -688,6 +766,8 @@ mod tests {
             max_message_size: 8192,
             max_concurrent_requests: 5000,
             receiver_tasks: 8,
+            max_fragment_assemblies: 5000,
+            fragment_ttl_secs: 30,
         };
         let server = UdpDceRpcServer::with_config(config);
         assert_eq!(server.config.max_message_size, 8192);
