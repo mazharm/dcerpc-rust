@@ -7,6 +7,33 @@
 //!
 //! This implementation is designed to be 100% wire compatible with native Windows
 //! RPC servers and clients, following the MS-RPCE specification.
+//!
+//! # Safety
+//!
+//! This module contains unsafe FFI calls to Windows SSPI APIs. The safety invariants are:
+//!
+//! ## Memory Safety
+//! - All SecHandle structures are initialized via Windows APIs before use
+//! - Output buffers from SSPI are always freed via FreeContextBuffer
+//! - Buffer lengths are validated before creating slices from raw pointers
+//! - Drop implementation ensures all handles are properly cleaned up
+//!
+//! ## Handle Validity
+//! - Credential handles are acquired via AcquireCredentialsHandleW
+//! - Context handles are initialized via InitializeSecurityContextW/AcceptSecurityContext
+//! - Handles are only used after successful initialization (checked via status codes)
+//! - Handles are freed in Drop implementation (DeleteSecurityContext, FreeCredentialsHandle)
+//!
+//! ## Buffer Safety
+//! - SecBuffer structures point to either:
+//!   - Memory allocated by SSPI (freed via FreeContextBuffer)
+//!   - Rust-owned buffers (lifetime managed by Rust)
+//! - Buffer sizes are always validated before slice creation
+//! - pvBuffer nullability is checked before dereferencing
+//!
+//! ## Thread Safety
+//! - SspiContext is not Send/Sync (Windows SSPI contexts are not thread-safe)
+//! - Each connection maintains its own security context
 
 use crate::security::{AuthLevel, AuthType, SecurityContextState};
 use bytes::Bytes;
@@ -417,12 +444,17 @@ impl Drop for SspiContext {
     fn drop(&mut self) {
         // Clean up security context
         if let Some(ref mut ctx) = self.ctx_handle {
+            // Safety: ctx is a valid SecHandle that was initialized by 
+            // InitializeSecurityContextW or AcceptSecurityContext.
+            // DeleteSecurityContext is safe to call on any valid context handle.
             unsafe {
                 let _ = DeleteSecurityContext(ctx);
             }
         }
 
         // Clean up credentials handle
+        // Safety: cred_handle was initialized by AcquireCredentialsHandleW
+        // and FreeCredentialsHandle is safe to call on any valid credentials handle.
         unsafe {
             let _ = FreeCredentialsHandle(&mut self.cred_handle);
         }
@@ -447,6 +479,11 @@ fn acquire_credentials(package_name: &str, is_client: bool) -> SspiResult<SecHan
     };
 
     let status = unsafe {
+        // Safety: All parameters are properly initialized:
+        // - cred_handle is a valid handle from acquire_credentials
+        // - package_wide is a null-terminated UTF-16 string
+        // - cred_use is a valid SECPKG_CRED_* constant
+        // - cred_handle output is properly initialized
         AcquireCredentialsHandleW(
             PCWSTR::null(),                     // Principal (use current user)
             PCWSTR(package_wide.as_ptr()),      // Package name
@@ -513,6 +550,12 @@ fn initialize_security_context(
     let ctx_ptr = ctx_handle.map(|h| h as *const SecHandle);
 
     let status = unsafe {
+        // Safety: All parameters are properly initialized:
+        // - cred_handle is a valid credential handle
+        // - ctx_handle (if Some) is a valid context handle from previous call
+        // - target_ptr is either null or points to a valid null-terminated UTF-16 string
+        // - out_desc contains a valid SecBufferDesc with properly initialized SecBuffer
+        // - new_ctx will be initialized by the function on success
         InitializeSecurityContextW(
             Some(cred_handle as *const SecHandle),
             ctx_ptr,

@@ -51,18 +51,21 @@ impl FragmentGenerator {
 
         let auth_overhead = if auth_len > 0 {
             // Auth padding (worst case 15 bytes) + auth verifier header (8 bytes) + auth value
-            15 + 8 + auth_len as usize
+            // Use checked arithmetic to prevent overflow
+            let padding_and_header = 15usize.saturating_add(8);
+            padding_and_header.saturating_add(auth_len as usize)
         } else {
             0
         };
 
-        let overhead = header_size + body_header_size + object_uuid_size + auth_overhead;
+        // Use checked arithmetic for total overhead calculation
+        let overhead = header_size
+            .saturating_add(body_header_size)
+            .saturating_add(object_uuid_size)
+            .saturating_add(auth_overhead);
 
-        if max_frag as usize > overhead {
-            max_frag as usize - overhead
-        } else {
-            0
-        }
+        // Return 0 if overhead is larger than max_frag
+        (max_frag as usize).saturating_sub(overhead)
     }
 
     /// Fragment a Request PDU into multiple fragments if needed.

@@ -117,11 +117,23 @@ impl<T: AsyncRead + Unpin> DceRpcTransport<T> {
 
         let start_len = self.read_buf.len();
         let spare = self.read_buf.spare_capacity_mut();
+        
+        // Safety: spare_capacity_mut() returns uninitialized memory that is safe to write to.
+        // We must ensure that:
+        // 1. We only write up to spare.len() bytes
+        // 2. We only mark as initialized the actual bytes written (n)
+        // 3. n <= spare.len() is guaranteed by AsyncRead contract
         let buf =
             unsafe { std::slice::from_raw_parts_mut(spare.as_mut_ptr() as *mut u8, spare.len()) };
 
         let n = self.inner.read(buf).await?;
+        
+        // Verify AsyncRead contract: n must not exceed buffer size
+        debug_assert!(n <= spare.len(), "AsyncRead implementation returned more bytes than buffer size");
+        
         if n > 0 {
+            // Safety: We've verified n <= spare.len() above, and the bytes [start_len..start_len+n]
+            // have been initialized by the read operation
             unsafe {
                 self.read_buf.set_len(start_len + n);
             }
