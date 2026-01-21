@@ -8,16 +8,15 @@
 
 mod common;
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytes::{Bytes, BytesMut, Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::future::join_all;
 
 use common::*;
-use dcerpc::{DceRpcClient, DceRpcServer, Interface, InterfaceBuilder, SyntaxId, Uuid};
-use dcerpc::dcerpc_pipe::{PipeWriter, PipeReader, PipeChunk, PipeFormat};
+use dcerpc::{Interface, InterfaceBuilder};
+use dcerpc::dcerpc_pipe::{PipeChunk, PipeFormat, PipeReader, PipeWriter};
 use midl_ndr::NdrContext;
 
 /// Pipe service UUID
@@ -579,8 +578,8 @@ async fn test_pipe_writer_reader_roundtrip() {
     let data1: [u8; 4] = [1, 2, 3, 4];
     let data2: [u8; 4] = [5, 6, 7, 8];
 
-    writer.write_bytes(&data1);
-    writer.write_bytes(&data2);
+    writer.write_bytes(&data1).unwrap();
+    writer.write_bytes(&data2).unwrap();
     let encoded = writer.finish();
 
     // Read it back

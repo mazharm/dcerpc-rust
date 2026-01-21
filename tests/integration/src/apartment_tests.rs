@@ -9,7 +9,6 @@
 mod common;
 
 use std::any::Any;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,8 +20,8 @@ use tokio::sync::Barrier;
 
 use common::*;
 use dcom::apartment::{
-    Apartment, ApartmentId, ApartmentType, CallFuture, ComObject,
-    MultithreadedApartment, SinglethreadedApartment, CallDispatcher,
+    Apartment, CallFuture, ComObject, MultithreadedApartment, SinglethreadedApartment,
+    CallDispatcher,
 };
 use dcom::types::Oid;
 use dcerpc::Uuid;
@@ -94,8 +93,6 @@ impl ComObject for TrackingObject {
             let mut ids = self.call_thread_ids.lock();
             ids.push(std::thread::current().id());
         }
-
-        let concurrent_ref = &self.concurrent_calls;
 
         Box::pin(async move {
             // Simulate some work

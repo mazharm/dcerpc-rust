@@ -10,13 +10,12 @@ mod common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use bytes::{Bytes, BytesMut, BufMut};
-use tokio::sync::Barrier;
+
+use bytes::Bytes;
 use futures::future::join_all;
+use tokio::sync::Barrier;
 
 use common::*;
-use dcerpc::{DceRpcClient, SyntaxId, Uuid};
-use midl_ndr::NdrContext;
 
 /// Test: High concurrency with many simultaneous clients
 /// This tests race conditions in connection handling and request processing
