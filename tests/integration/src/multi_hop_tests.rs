@@ -9,13 +9,11 @@
 mod common;
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut, Buf, BufMut};
 use futures::future::join_all;
-use parking_lot::Mutex;
 
 use common::*;
 use dcerpc::{DceRpcClient, DceRpcServer, Interface, InterfaceBuilder, SyntaxId, Uuid};
@@ -30,27 +28,6 @@ pub const DATABASE_UUID: &str = "d1b2a3c4-5e6f-7890-bcde-f12345678901";
 
 /// Service version
 pub const SERVICE_VERSION: (u16, u16) = (1, 0);
-
-/// Multi-hop operation tracking
-struct HopTracker {
-    frontend_calls: AtomicU64,
-    backend_calls: AtomicU64,
-    database_calls: AtomicU64,
-    chain_complete: AtomicU64,
-    errors: Mutex<Vec<String>>,
-}
-
-impl HopTracker {
-    fn new() -> Self {
-        Self {
-            frontend_calls: AtomicU64::new(0),
-            backend_calls: AtomicU64::new(0),
-            database_calls: AtomicU64::new(0),
-            chain_complete: AtomicU64::new(0),
-            errors: Mutex::new(Vec::new()),
-        }
-    }
-}
 
 /// Create a database service (end of chain)
 fn create_database_service() -> Interface {

@@ -17,7 +17,7 @@ use bytes::{Bytes, BytesMut, Buf, BufMut};
 use futures::future::join_all;
 
 use common::*;
-use dcerpc::{DceRpcClient, DceRpcServer, Interface, InterfaceBuilder, SyntaxId, Uuid};
+use dcerpc::{Interface, InterfaceBuilder};
 use midl_ndr::{NdrContext, NdrEncode, NdrDecode, NdrString, NdrWString, UniquePtr};
 
 /// Interface for complex type testing

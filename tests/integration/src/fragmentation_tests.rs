@@ -10,7 +10,7 @@ mod common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, BytesMut};
 use futures::future::join_all;
 
 use common::*;
